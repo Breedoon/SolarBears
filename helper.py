@@ -1,6 +1,7 @@
 from colour import Color
 import matplotlib.pyplot as plt
 import numpy as np
+from datetime import datetime, timedelta
 
 colors = []
 
@@ -23,3 +24,8 @@ def plot_days(productions, entries_per_day=24, filename='day_plot'):
     fig.show()
     fig.savefig(filename + ".png", dpi=1000)
 
+# [start, end)
+def time_batches(start, end, interval={'hours': 1}):
+    while end > start:
+        yield start, start + timedelta(*interval)
+        start += timedelta(*interval)

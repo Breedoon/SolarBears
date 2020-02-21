@@ -2,12 +2,12 @@ import os
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
-from helper import plot_days
+from helper import plot_days, time_batches
 import requests
 
-DIR = 'solectria_raw_xml'
+DIR = 'active_sites_xml'
 URL = "http://solrenview.com/xmlfeed/ss-xmlN.php"
-wait_time = 6  # seconds
+wait_time = 1  # seconds
 last_fetch = 0
 
 site_ids = [4760, 5582, 5077]
@@ -45,23 +45,41 @@ def fetch(site_id, start, end):
         root = ET.fromstring(raw)
     except:
         return 0
-    val = root.find('sunspecData').find('d').find('m').findall('p')[1].text  # Power of first inverter
+    try:
+        val = root.find('sunspecData').find('d').find('m').findall('p')[1].text  # Power of first inverter
+    except:
+        print('error')  # temporarily for fetching all active sites
+        return 0
     return 0 if val == "null" else float(val)
-
-
-# [start, end)
-def hourly(start, end, hour_step=1):
-    while end > start:
-        yield start, start + timedelta(hours=hour_step)
-        start += timedelta(hours=hour_step)
 
 
 def get_hourly_production(site_id, start, end):
     production = []
-    for st, sp in hourly(start, end):
+    for st, sp in time_batches(start, end):
         production.append(fetch(site_id, st, sp))
-    plot_days(production, filename=get_file_name(get_params(site_id, start, end)))
+    plot_days(production)
+    print(production)
+
+
+def get_active_sites(filename='active_sites.txt'):
+    with open(filename, 'r') as f:
+        sites = f.readlines()
+        for site in sites:
+            while True:  # to try fetching until no error
+                try:
+                    fetch(site.strip(), datetime(2000, 1, 1), datetime(2020, 1, 1))
+                except requests.exceptions.ConnectionError:
+                    print('Interrupted')
+                    try:
+                        os.remove(get_file_name(get_params(site.strip(), datetime(2000, 1, 1), datetime(2020, 1, 1))))
+                    except:
+                        pass
+                    time.sleep(6.0)
+                    continue
+                else:
+                    break
 
 
 if __name__ == '__main__':
-    get_hourly_production(site_ids[0], datetime(2019, 1, 1), datetime(2019, 2, 1))
+    # get_hourly_production(site_ids[0], datetime(2019, 1, 1), datetime(2019, 2, 1))
+    get_active_sites()
