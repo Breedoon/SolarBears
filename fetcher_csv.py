@@ -5,6 +5,8 @@ import numpy as np
 import requests
 from io import StringIO
 from helper import plot_days, time_batches
+from fetcher_xml import get_active_sites
+from os import listdir
 from datetime import datetime, timedelta
 
 DIR = 'solectria_raw_csv'
@@ -13,29 +15,53 @@ URL = "https://solrenview.com/cgi-bin/cgihandler.cgi"
 wait_time = 0.5  # seconds
 last_fetch = 0
 
-site_ids = [4760, 5582, 5077]
+unit_view = {'day': '0', 'week': '1', 'month': '2', '0': 'day', '1': 'week', '2': 'month'}
 
-# TODO: store units
-# a dict of all unique units found in data for a specific value, since they are not stored
-# e.g.: {'AC Energy': {[kWh]], ...}, ...}
-units = {}
+sites_data = pd.read_csv('active_sites_data.csv')
+sites_data.set_index('site_id', inplace=True)
+
+
+# modifies active_sites_data.csv by adding a column to the sites available for .csv fetch
+def store_sites(sites):
+    for site in sites:
+        fetch("0,0,1,1", site)
+
+    # reading all files in DIR
+    files = [f for f in listdir(DIR)]
+    sites = [int(f[4:f.find('_')]) for f in files]
+    names = [f[f.find('_') + 1:f.find('(')] for f in files]
+    csv_dict = {k: v for k, v in sorted(dict(zip(sites, names)).items(), key=lambda item: item[0])}
+
+    # reading sites metadata file
+    df = pd.read_csv('active_sites_data.csv')
+    df.set_index(df.columns[0], inplace=True)
+    df.insert(9, 'csv_name', '')
+    for site_id in csv_dict:
+        if site_id in df['csv_name']:
+            df['csv_name'][site_id] = csv_dict[site_id]
+        else:
+            df = pd.concat([df, pd.DataFrame({'csv_name': csv_dict[site_id]}, [site_id])])
+    df.sort_index(inplace=True)
+    df['csv_name'] = df['csv_name']  # idk why it works but without this there's only 300 csv_names committed out of 800
+    df.to_csv('active_sites_data.csv')
+
+
+# returns name of a .csv file given site_id and period
+# site_id - int, view - str (e.g., "0,1,0,0"), dt - datetime obj of the beginning of intended period
+def get_file_name(site_id, view, dt):
+    # TODO: calculate filenames from the past
+    return "Site" + str(site_id) + "_" + sites_data['csv_name'][site_id] + '(Inverter-Direct,' + \
+           unit_view[view.split(',')[1]].capitalize() + ' of ' + str(dt.date()) + ').csv'
+
+
+# returns current datetime in given timezon
+def get_timezone_time(timezone):
+    return datetime.now()  # TODO: make it actually work
 
 
 # converts power to energy, t in minutes
 def w_to_wh(w, t):
     return w * t * 60 / 3600
-
-
-# converts a unit (day/week/mon#h) to a digit (0/1/2)
-def unit_to_view(unit):
-    if unit == 'day':
-        return 0
-    elif unit == 'week':
-        return 1
-    elif unit == 'month':
-        return 2
-    else:
-        raise ValueError("unit can be either 'day', 'week', or 'month'")
 
 
 # returns datetime of previous monday; if dt is monday, returns itself
@@ -72,7 +98,11 @@ def get_historic_data(site_id, start, end, current):
     return total
 
 
-def get_file(filename, url):
+# view - string of arguments
+def fetch(view, site_id):
+    filename = DIR + "/" + get_file_name(site_id, view, get_timezone_time(sites_data['timezone'][site_id]))
+    url = URL + '?view={view}&cond=site_id={site_id}'.format(view=view, site_id=site_id)
+    print("Fetching: " + filename)
     if not os.path.exists(DIR):
         os.makedirs(DIR)
     if not os.path.exists(filename):
@@ -80,27 +110,26 @@ def get_file(filename, url):
         while time.time() - last_fetch < wait_time:
             time.sleep(0.1)
         last_fetch = time.time()
-        r = requests.get(url)
-        raw = r.text
+
+        s = str(requests.get(url).content)
+        try:
+            new_url = "https://solrenview.com" + s[s.index('/downloads'):s.index('.csv') + 4]
+        except:
+            return ""
+
+        new_filename = DIR + '/' + new_url.split('/')[-1]  # .csv file
+
+        if new_filename != filename:  # if predicted filename is not the actual one
+            print(new_filename, filename)
+
+        raw = str(requests.get(url).content)
         with open(filename, 'w+') as f:
             f.write(raw)
     else:
         with open(filename, 'r') as f:
             raw = f.read()
+
     return raw
-
-
-# view - string of arguments
-def fetch(view, site_id):
-    url = URL + '?view={view}&cond=site_id={site_id}'.format(view=view, site_id=site_id)
-    s = str(requests.get(url).content)  # TODO check raw data
-    try:
-        new_url = "https://solrenview.com" + s[s.index('/downloads'):s.index('.csv') + 4]
-    except:
-        return None
-    filename = DIR + '/' + new_url.split('/')[-1]  # .csv file
-    print("Fetching: " + filename)
-    return get_file(filename, new_url)
 
 
 # raw - str of .csv
@@ -119,7 +148,7 @@ def parse(raw):
     csv.set_index(csv.columns[0], inplace=True)
     dfs = np.split(csv, indexes, axis=1)
 
-    names = [] * len(dfs) 
+    names = [] * len(dfs)
     dfs_fin = [] * len(dfs)
     for i in range(0, len(dfs)):
         rows = np.split(dfs[i], [1, 2])  # splitting into columns (0), units (1) - unused, rest of data (2)
@@ -175,5 +204,4 @@ def merge_inverters(inv_dfs, cols=['AC Power'], merge_functions=[lambda lst: sum
 
 
 if __name__ == '__main__':
-    dfs = get_historic_data(4760, datetime(2019, 12, 1), datetime(2020, 1, 1), datetime.now())
-    plot_days([w_to_wh(p, 10) for p in merge_inverters(dfs)['AC Power']], 24 * 6)
+    fetch("0,0,1,1", 37)

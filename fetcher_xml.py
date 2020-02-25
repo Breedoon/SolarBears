@@ -43,8 +43,6 @@ def fetch(site_id, start, end):
         with open(filename, 'r') as f:
             raw = f.read()
 
-    # val = root.find('sunspecData').find('d').find('m').findall('p')[1].text  # Power of first inverter
-
     return raw
 
 
@@ -61,33 +59,26 @@ def get_hourly_production(site_id, start, end):
     print(production)
 
 
-# check missing values in sites' metadata and returns a dict
-# e.g., {site_id: {'name': 0, ...'}}, 0 - no value for that feature
+# fetches active sites metadata, stores it in a csv
 def check_metadata(active_sites):
     sites_xmls = {}
     for site in active_sites:
         xml = fetch(site, *get_stored_datetimes())
         if xml:  # if xml is not empty
             sites_xmls[site] = ET.fromstring(xml)
-    interest_tags = ['name', 'activationDate', 'latitude', 'latitude', 'longitude', 'line1', 'city', 'state', 'postal',
+    interest_tags = ['name', 'activationDate', 'latitude', 'longitude', 'line1', 'city', 'state', 'postal',
                      'timezone']
-    results = {site: {tag: 0 for tag in interest_tags} for site in sites_xmls.keys()}
+    df = pd.DataFrame(index=sites_xmls.keys(), columns=interest_tags)
     for i in sites_xmls:
         for tag in interest_tags:
-            try:
-                found_tag = sites_xmls[i].find(".//" + tag)
-                if found_tag.text.strip().replace('?', '') or len(found_tag.findall('.//')) == 0:  # if tag is not emtpy
-                    results[i][tag] = 1
-            except:
-                continue
-    count_empty = lambda x: len([i for i in x[1] if x[1][i] == 0])  # returns number of zeros in for a site
-    results = {k: v for k, v in sorted(results.items(), key=count_empty, reverse=True)}
-    max_empty = [count_empty(i) for i in results.items()]
-    emtpy_nums = {i: max_empty.count(i) for i in set(max_empty)}  # e.g., {2: 695, ...} - 695 sites with 2 features missing
-    freq = dict(pd.DataFrame(results.values()).sum())  # e.g., {'name': 1076, ...} - 1076 sites don't have a 'name'
-    # freq = {'name': 1076, 'activationDate': 1126, 'latitude': 379, 'longitude': 379, 'line1': 1121, 'city': 1122, 'state': 1122, 'postal': 1085, 'timezone': 1126}
-    # emtpy_nums: {0: 335, 1: 43, 2: 695, 3: 50, 5: 3}
-    return results
+            res = sites_xmls[i].find(".//" + tag).text
+            if res:
+                df[tag][i] = res.strip().replace('?', '')
+            else:
+                df[tag][i] = ""
+
+    df.to_csv('active_sites_data.csv')
+    return df
 
 
 def get_active_sites(filename='active_sites.txt'):
@@ -116,5 +107,4 @@ def fetch_active_sites():
 
 
 if __name__ == '__main__':
-    # get_hourly_production(site_ids[0], datetime(2019, 1, 1), datetime(2019, 2, 1))
     check_metadata(get_active_sites())
