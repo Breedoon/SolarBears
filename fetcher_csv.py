@@ -5,10 +5,13 @@ import numpy as np
 import requests
 from io import StringIO
 from helper import plot_days, time_batches
+from helper_db import get_db_params
 from fetcher_xml import get_active_sites
+from config_db import config_db
 from os import listdir
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import sqlalchemy
 
 DIR = 'solectria_raw_csv'
 URL = "https://solrenview.com/cgi-bin/cgihandler.cgi"
@@ -40,6 +43,25 @@ get_date_ago = {'day': lambda target, n: round_dt['day'](target) - timedelta(day
 
 sites_data = pd.read_csv('active_sites_data.csv')
 sites_data.set_index('site_id', inplace=True)
+
+
+# inserts dataframe (df) into the database (from params) into given table
+# defaults - default values for columns that are in the database but not in dataframe
+# e.g., {'site_id': 4760} to will add a column 'site_id' and puts 4760 in all rows
+# rename - specified which columns should be renamed before putting into a database
+# e.g., {"AC Power": "value"} - replaces dataframe's column 'AC Power' with databases's 'value'
+def to_database(df, params, table, defaults={'site_id': 0}, rename={"AC Power": "value"}):
+    con = None
+    try:
+        engine = sqlalchemy.create_engine("postgresql://{user}:{password}@{host}:5432/{database}".format(**params))
+        con = engine.connect()
+        df = df.rename(columns=rename)
+        for item in defaults.items():
+            df.insert(0, item[0], item[1])
+        df.to_sql(table, con, if_exists='append', index_label='date')
+    finally:
+        if con:
+            con.close()
 
 
 # modifies active_sites_data.csv by adding a column to the sites available for .csv fetch
@@ -95,7 +117,7 @@ def w_to_wh(w, t):
 # end - end datetime at the timezone
 # time_unit - 'day', 'week', or 'month' in which data will be fetched
 # 'day': 1-minute intervals, 'week': 10-minute intervals, 'month': 1-hour intervals
-def get_historic_data(site_id, start, end, current, time_unit='week'):
+def get_historical_data(site_id, start, end, current, time_unit='week'):
     total = None
     for i in range(get_units_ago[time_unit](start, current),  # iterating through view 'ago' values
                    get_units_ago[time_unit](end - timedelta(minutes=1), current) - 1, -1):
@@ -177,12 +199,11 @@ def parse(raw):
 # TODO: optimize
 def clean(dfs):
     for df in dfs:
-        for i in df.index:
-            for col in df.columns:
+        for col in df.columns:
+            for i in df.index:
                 data = df[col][i]  # TODO: duplicate indexes for month
                 if data != data or data == "null" or data == "(null" or data == "null)" or data == "(null)":
                     df[col][i] = 0
-                    break
                 else:
                     try:
                         df[col][i] = float(data)
@@ -214,12 +235,13 @@ def merge_inverters(inv_dfs, cols=['AC Power'], merge_functions=[lambda lst: sum
                 final_df[cols[ci]][i] = merge_functions[ci](total)
             except:
                 pass
-
     return final_df
 
 
 if __name__ == '__main__':
-    df = merge_inverters(get_historic_data(4760, datetime(2019, 1, 1), datetime(2019, 11, 1), datetime.now(), 'month'),
+    df = merge_inverters(get_historical_data(4760, datetime(2020, 1, 1), datetime(2020, 2, 1), datetime.now(), 'week'),
                          merge_functions=[lambda lst: w_to_wh(sum(lst), 10)])
     print(df)
-    plot_days(df['AC Power'])
+    plot_days(df['AC Power'], 24 * 6)
+    to_database(df, get_db_params(cloud_connect=True), "production",
+                {'site_id': 4760, 'unit': 'Wh', 'measured_by': 'INVERTER'}, {"AC Power": "value"})
