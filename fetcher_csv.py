@@ -8,6 +8,7 @@ from helper import plot_days, time_batches
 from fetcher_xml import get_active_sites
 from os import listdir
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 
 DIR = 'solectria_raw_csv'
 URL = "https://solrenview.com/cgi-bin/cgihandler.cgi"
@@ -16,6 +17,26 @@ wait_time = 0.5  # seconds
 last_fetch = 0
 
 unit_view = {'day': '0', 'week': '1', 'month': '2', '0': 'day', '1': 'week', '2': 'month'}
+
+# returns datetime rounded to the chosen unit
+# 'day' returns datetime without hours, minutes and seconds
+# 'week' returns previous monday; if dt is monday, returns itself
+# 'month' returns same month with 1 day
+round_dt = {'day': lambda dt: datetime(dt.year, dt.month, dt.day),
+            'week': lambda dt: round_dt['day'](dt) - timedelta(days=dt.weekday()),
+            'month': lambda dt: datetime(dt.year, dt.month, 1)}
+
+# return number of time units (days/weeks/months) between start and end (inclusive)
+# end - end datetime at the timezone
+get_units_ago = {'day': lambda start, end: (round_dt['day'](end) - round_dt['day'](start)).days,
+                 'week': lambda start, end: (round_dt['week'](end) - round_dt['week'](start)).days // 7,
+                 'month': lambda start, end: (end.year - start.year) * 12 + end.month - start.month}
+
+# returns date n units before target
+# end - end datetime at the timezone
+get_date_ago = {'day': lambda target, n: round_dt['day'](target) - timedelta(days=n),
+                'week': lambda target, n: round_dt['week'](target) - relativedelta(weeks=n),
+                'month': lambda target, n: round_dt['month'](target) - relativedelta(months=n)}
 
 sites_data = pd.read_csv('active_sites_data.csv')
 sites_data.set_index('site_id', inplace=True)
@@ -49,12 +70,17 @@ def store_sites(sites):
 # returns name of a .csv file given site_id and period
 # site_id - int, view - str (e.g., "0,1,0,0"), dt - datetime obj of the beginning of intended period
 def get_file_name(site_id, view, dt):
-    # TODO: calculate filenames from the past
+    views = view.split(',')
+    unit = unit_view[views[1]]
+    if unit != 'month':
+        of = str(get_date_ago[unit](dt, int(views[2])).date())
+    else:
+        of = get_date_ago[unit](dt, int(views[2])).date().strftime("%B %Y")
     return "Site" + str(site_id) + "_" + sites_data['csv_name'][site_id] + '(Inverter-Direct,' + \
-           unit_view[view.split(',')[1]].capitalize() + ' of ' + str(dt.date()) + ').csv'
+           unit.capitalize() + ' of ' + of + ').csv'
 
 
-# returns current datetime in given timezon
+# returns end datetime in given timezone
 def get_timezone_time(timezone):
     return datetime.now()  # TODO: make it actually work
 
@@ -64,29 +90,16 @@ def w_to_wh(w, t):
     return w * t * 60 / 3600
 
 
-# returns datetime of previous monday; if dt is monday, returns itself
-def get_prev_monday(dt):
-    return dt - timedelta(days=dt.weekday())
-
-
-# returns datetime without hour, minute, second
-def clean_dt(dt):
-    return datetime(dt.year, dt.month, dt.day)
-
-
-# return number of weeks before end date
-# current - current datetime at the timezone
-def get_weeks_ago(target, current):
-    return (get_prev_monday(clean_dt(current)) - get_prev_monday(clean_dt(target))).days // 7
-
-
 # returns a dataframe of 10-minute production batches [start, end)
 # start, end - datetime objects of time interval
-# current - current datetime at the timezone
-def get_historic_data(site_id, start, end, current):
+# end - end datetime at the timezone
+# time_unit - 'day', 'week', or 'month' in which data will be fetched
+# 'day': 1-minute intervals, 'week': 10-minute intervals, 'month': 1-hour intervals
+def get_historic_data(site_id, start, end, current, time_unit='week'):
     total = None
-    for i in range(get_weeks_ago(start, current), get_weeks_ago(end, current) - 1, -1):  # from farthest week to 0
-        data = get_inv_data(site_id, "0,1,{},1".format(i))
+    for i in range(get_units_ago[time_unit](start, current),  # iterating through view 'ago' values
+                   get_units_ago[time_unit](end - timedelta(minutes=1), current) - 1, -1):
+        data = get_inv_data(site_id, "0,{},{},1".format(unit_view[time_unit], i))
         if not total:  # if first append
             total = data
             continue
@@ -101,7 +114,6 @@ def get_historic_data(site_id, start, end, current):
 # view - string of arguments
 def fetch(view, site_id):
     filename = DIR + "/" + get_file_name(site_id, view, get_timezone_time(sites_data['timezone'][site_id]))
-    url = URL + '?view={view}&cond=site_id={site_id}'.format(view=view, site_id=site_id)
     print("Fetching: " + filename)
     if not os.path.exists(DIR):
         os.makedirs(DIR)
@@ -111,6 +123,7 @@ def fetch(view, site_id):
             time.sleep(0.1)
         last_fetch = time.time()
 
+        url = URL + '?view={view}&cond=site_id={site_id}'.format(view=view, site_id=site_id)
         s = str(requests.get(url).content)
         try:
             new_url = "https://solrenview.com" + s[s.index('/downloads'):s.index('.csv') + 4]
@@ -122,7 +135,7 @@ def fetch(view, site_id):
         if new_filename != filename:  # if predicted filename is not the actual one
             print(new_filename, filename)
 
-        raw = str(requests.get(url).content)
+        raw = requests.get(new_url).text
         with open(filename, 'w+') as f:
             f.write(raw)
     else:
@@ -161,13 +174,15 @@ def parse(raw):
 
 # dfs - list of dataframes
 # replaces nan and null with 0 and tries to convert all columns to float
+# TODO: optimize
 def clean(dfs):
     for df in dfs:
-        for col in df.columns:
-            for i in range(len(df[col])):
-                data = df[col][i]
+        for i in df.index:
+            for col in df.columns:
+                data = df[col][i]  # TODO: duplicate indexes for month
                 if data != data or data == "null" or data == "(null" or data == "null)" or data == "(null)":
                     df[col][i] = 0
+                    break
                 else:
                     try:
                         df[col][i] = float(data)
@@ -204,4 +219,7 @@ def merge_inverters(inv_dfs, cols=['AC Power'], merge_functions=[lambda lst: sum
 
 
 if __name__ == '__main__':
-    fetch("0,0,1,1", 37)
+    df = merge_inverters(get_historic_data(4760, datetime(2019, 1, 1), datetime(2019, 11, 1), datetime.now(), 'month'),
+                         merge_functions=[lambda lst: w_to_wh(sum(lst), 10)])
+    print(df)
+    plot_days(df['AC Power'])
