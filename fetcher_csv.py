@@ -47,9 +47,9 @@ sites_data.set_index('site_id', inplace=True)
 
 # inserts dataframe (df) into the database (from params) into given table
 # defaults - default values for columns that are in the database but not in dataframe
-# e.g., {'site_id': 4760} to will add a column 'site_id' and puts 4760 in all rows
+# e.g.: {'site_id': 4760} to will add a column 'site_id' and puts 4760 in all rows
 # rename - specified which columns should be renamed before putting into a database
-# e.g., {"AC Power": "value"} - replaces dataframe's column 'AC Power' with databases's 'value'
+# e.g.: {"AC Power": "value"} - replaces dataframe's column 'AC Power' with databases's 'value'
 def to_database(df, params, table, defaults={'site_id': 0}, rename={"AC Power": "value"}):
     con = None
     try:
@@ -90,7 +90,7 @@ def store_sites(sites):
 
 
 # returns name of a .csv file given site_id and period
-# site_id - int, view - str (e.g., "0,1,0,0"), dt - datetime obj of the beginning of intended period
+# site_id - int, view - str (e.g.: "0,1,0,0"), dt - datetime obj of the beginning of intended period
 def get_file_name(site_id, view, dt):
     views = view.split(',')
     unit = unit_view[views[1]]
@@ -103,7 +103,8 @@ def get_file_name(site_id, view, dt):
 
 
 # returns end datetime in given timezone
-def get_timezone_time(timezone):
+def get_timezone_time(site_id):
+    timezone = sites_data['timezone'][site_id]
     return datetime.now()  # TODO: make it actually work
 
 
@@ -119,23 +120,26 @@ def w_to_wh(w, t):
 # 'day': 1-minute intervals, 'week': 10-minute intervals, 'month': 1-hour intervals
 def get_historical_data(site_id, start, end, current, time_unit='week'):
     total = None
+    names = None
     for i in range(get_units_ago[time_unit](start, current),  # iterating through view 'ago' values
                    get_units_ago[time_unit](end - timedelta(minutes=1), current) - 1, -1):
-        data = get_inv_data(site_id, "0,{},{},1".format(unit_view[time_unit], i))
+        name, data = get_inv_data(site_id, "0,{},{},1".format(unit_view[time_unit], i))
         if not total:  # if first append
             total = data
+            names = name  # assuming inverters names don't change over time
             continue
         for j in range(len(total)):
             total[j] = pd.concat([total[j], data[j]])
 
     for i in range(len(total)):  # removing rows outside of [start, end), e.g.: [mon, tue, |start, ... |, end, sat, sun]
         total[i] = total[i][np.logical_and(str(start) <= total[i].index, total[i].index < str(end))]
-    return total
+    return names, total
 
 
 # view - string of arguments
 def fetch(view, site_id):
-    filename = DIR + "/" + get_file_name(site_id, view, get_timezone_time(sites_data['timezone'][site_id]))
+    filename = DIR + "/" + get_file_name(site_id, view, get_timezone_time(site_id))
+    tt = time.time()
     print("Fetching: " + filename)
     if not os.path.exists(DIR):
         os.makedirs(DIR)
@@ -163,54 +167,61 @@ def fetch(view, site_id):
     else:
         with open(filename, 'r') as f:
             raw = f.read()
-
     return raw
 
 
 # raw - str of .csv
-# returns a tuple: ['inverter_name', ...], [<dataframe>, ...]
+# returns a tuple of lists: ['inverter_name1', ...], [<dataframe>, ...]
 def parse(raw):
+    tt = time.time()
     raw = raw[raw.index(','):]  # remove the header ("Quad 7 - Phase 2...")
-
+    raw = raw.replace('(', '').replace(')', '')
     # list ['', 'inv#1  - 1013021546296  (PVI 28TL)', '', '', '', '', '', ...]
     inverters_raw = raw[:raw.index('Timeframe')].strip().split(',')
 
-    # indexes of inverters to split; - 1 because timeframe is removed later
+    # indexes of inverters to split vertically; - 1 because timeframe is removed later
     indexes = [i - 1 for i in range(len(inverters_raw)) if inverters_raw[i] != '' and i != 1]
 
     csv = pd.read_csv(StringIO(raw))
     # setting timeframe as an index (instead of 0, 1, ...) and removing brackets: e.g.: '[2019-...:00]' -> '2019-...:00'
     csv.set_index(csv.columns[0], inplace=True)
-    dfs = np.split(csv, indexes, axis=1)
+
+    # dfs = np.split(csv, indexes, axis=1)  # ineffective, takes about 0.4s
+
+    indexes.append(len(csv.columns))
+    dfs = [] * len(indexes)
+    prev_i = 0
+    for i in indexes:
+        dfs.append(csv[csv.columns[prev_i:i]])
+        prev_i = i
+
+    del csv, raw
 
     names = [] * len(dfs)
     dfs_fin = [] * len(dfs)
     for i in range(0, len(dfs)):
         rows = np.split(dfs[i], [1, 2])  # splitting into columns (0), units (1) - unused, rest of data (2)
-        rows[2].columns = list(rows[0].iloc[0])  # setting column names [AC Energy, AC Power, ...]
-        rows[2].index = list(map(lambda x: x[1:-1], rows[2].index))
-        dfs_fin.append(rows[2])
+        main_df = rows[2]
+        main_df.columns = list(rows[0].iloc[0])  # setting column names [AC Energy, AC Power, ...]
+        main_df.index = list(map(lambda x: x[1:-1], rows[2].index))
+        main_df.fillna(0, inplace=True)
+        main_df["AC Power"] = main_df["AC Power"].astype(int)
+        main_df["AC Energy"] = main_df["AC Power"].astype(float)
+        try:
+            main_df["AC Current"] = main_df["AC Power"].astype(float)
+        except KeyError:  # "AC Current" not in df
+            pass
+        dfs_fin.append(main_df)
         names.append(rows[0].columns[0])
+
     return names, dfs_fin
 
 
-# dfs - list of dataframes
-# replaces nan and null with 0 and tries to convert all columns to int
-def clean(dfs):
-    for df in dfs:
-        df = df.replace(['(null', 'null', 'null)'], 0)
-        # Remove unnecessary data and change type to int. We are keeping AC Power from 3 inverters only
-        df.iloc[:, [0, 1, 3]] = df.iloc[:, [0, 1, 3]].astype(float)
-        df = df.fillna(0)
-        df.iloc[:, [0, 1, 3]] = df.iloc[:, [0, 1, 3]].astype(int)
-        print(df.info())
-    return dfs
-
-
 # returns a dictionary of inverter names and dataframes of their production
-# e.g., {'inv #1 - 141894234': <dataframe>, ...}
+# e.g.: {'inv #1 - 141894234': <dataframe>, ...}
 def get_inv_data(site_id, view):
-    return clean(parse(fetch(view, site_id))[1])  # TODO: save inverter names
+    names, dfs = parse(fetch(view, site_id))
+    return names, dfs  # TODO: save inverter names
 
 
 # merges inverter dataframes by column using merge_function for each of the columns
@@ -230,14 +241,25 @@ def merge_inverters(inv_dfs, cols=['AC Power'], merge_functions=[lambda lst: sum
                 final_df[cols[ci]][i] = merge_functions[ci](total)
             except:
                 pass
-    #print(final_df)
     return final_df
 
 
+# Inverter merge optimized for only summing inverter's AC Power and converting it to Wh
+def merge_inv_production(inv_dfs):
+    # time interval in seconds for conversion to watts; based on indexes[1] - indexes[0]
+    interval = sum((np.array(list(map(int, inv_dfs[0].index[1].split(' ')[1].split(':'))))
+                    - np.array(list(map(int, inv_dfs[0].index[0].split(' ')[1].split(':')))))
+                   * np.array([3600, 60, 1]))
+    vals = inv_dfs[0]["AC Power"]
+    for df in inv_dfs[1:]:
+        vals = vals.add(df['AC Power'])
+    vals = vals.mul(interval / 3600)
+    return pd.DataFrame(vals)
+
+
 if __name__ == '__main__':
-    df = merge_inverters(get_historical_data(4760, datetime(2020, 2, 1), datetime(2020, 2, 26), datetime.now(), 'week'),
-                         merge_functions=[lambda lst: w_to_wh(sum(lst), 10)])
-    print(df)
-    plot_days(df['AC Power'], 24 * 6)
-    to_database(df, get_db_params(cloud_connect=True), "production",
+    inv_names, inv_data = get_historical_data(4760, datetime(2019, 1, 1), datetime(2019, 2, 1), datetime.now(), 'week')
+    total_data = merge_inv_production(inv_data)
+    plot_days(total_data['AC Power'], 24 * 6)
+    to_database(total_data, get_db_params(cloud_connect=True), "production",
                 {'site_id': 4760, 'unit': 'Wh', 'measured_by': 'INVERTER'}, {"AC Power": "value"})
