@@ -195,20 +195,15 @@ def parse(raw):
 
 
 # dfs - list of dataframes
-# replaces nan and null with 0 and tries to convert all columns to float
-# TODO: optimize
+# replaces nan and null with 0 and tries to convert all columns to int
 def clean(dfs):
     for df in dfs:
-        for col in df.columns:
-            for i in df.index:
-                data = df[col][i]  # TODO: duplicate indexes for month
-                if data != data or data == "null" or data == "(null" or data == "null)" or data == "(null)":
-                    df[col][i] = 0
-                else:
-                    try:
-                        df[col][i] = float(data)
-                    except ValueError:
-                        pass
+        df = df.replace(['(null', 'null', 'null)'], 0)
+        # Remove unnecessary data and change type to int. We are keeping AC Power from 3 inverters only
+        df.iloc[:, [0, 1, 3]] = df.iloc[:, [0, 1, 3]].astype(float)
+        df = df.fillna(0)
+        df.iloc[:, [0, 1, 3]] = df.iloc[:, [0, 1, 3]].astype(int)
+        print(df.info())
     return dfs
 
 
@@ -235,11 +230,12 @@ def merge_inverters(inv_dfs, cols=['AC Power'], merge_functions=[lambda lst: sum
                 final_df[cols[ci]][i] = merge_functions[ci](total)
             except:
                 pass
+    #print(final_df)
     return final_df
 
 
 if __name__ == '__main__':
-    df = merge_inverters(get_historical_data(4760, datetime(2020, 1, 1), datetime(2020, 2, 1), datetime.now(), 'week'),
+    df = merge_inverters(get_historical_data(4760, datetime(2020, 2, 1), datetime(2020, 2, 26), datetime.now(), 'week'),
                          merge_functions=[lambda lst: w_to_wh(sum(lst), 10)])
     print(df)
     plot_days(df['AC Power'], 24 * 6)
