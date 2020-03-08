@@ -10,7 +10,8 @@ import requests
 import sqlalchemy
 from dateutil.relativedelta import relativedelta
 
-from helper_db import get_db_params
+from helper_db import get_db_params, run_query
+from helper import get_errors
 
 DIR = 'solectria_raw_csv'
 URL = "https://solrenview.com/cgi-bin/cgihandler.cgi"
@@ -38,7 +39,7 @@ get_units_ago = {'day': lambda start, end: (round_dt['day'](end) - round_dt['day
                  'week': lambda start, end: (round_dt['week'](end) - round_dt['week'](start)).days // 7,
                  'month': lambda start, end: (end.year - start.year) * 12 + end.month - start.month}
 
-# returns date n units before target
+# returns date t units before target
 # end - end datetime at the timezone
 get_date_ago = {'day': lambda target, n: round_dt['day'](target) - timedelta(days=n),
                 'week': lambda target, n: round_dt['week'](target) - relativedelta(weeks=n),
@@ -79,7 +80,8 @@ def split_inv_name(inv_name):
         manuf_id = inv_name[inv_name.index('(') + 1:inv_name[inv_name.index('('):].index(' ') + inv_name.index('(')]
 
     models = inv_name[inv_name.index('('):].replace('  ', ' ').split(' ')
-    model = models[-2] + " " + models[-1][-1]  # 'inv#3  - 1012841547503  (PVI 36TL)' -> 'PVI 36TL'
+    model = models[-2].replace('(', '') + " " + models[-1].replace(')',
+                                                                   '')  # 'inv#3  - 1012841547503  (PVI 36TL)' -> 'PVI 36TL'
     return order, manuf_id, model
 
 
@@ -176,7 +178,7 @@ def parse(raw):
         main_df = rows[2]
         main_df.columns = list(rows[0].iloc[0])  # setting column names [AC Energy, AC Power, ...]
         main_df.index = list(map(lambda x: x[1:-1], rows[2].index))  # '[2020-02-23 00:00:00]' -> '2020-02-23 00:00:00'
-        # main_df.fillna(0, inplace=True)  # TODO: confirm
+        # main_df.fillna(0, inplace=True)
         if 'inv' in rows[0].columns[0]:
             main_df["AC Power"] = main_df["AC Power"].astype(float)
             main_df["AC Energy"] = main_df["AC Power"].astype(float)
@@ -253,7 +255,8 @@ def to_database(df, table, defaults={}, rename={}, drop=[], index_label='date'):
     con = None
     try:
         engine = sqlalchemy.create_engine(
-            "postgresql://{user}:{password}@{host}:5432/{database}".format(**get_db_params()))
+            "postgresql://{user}:{password}@{host}:5432/{database}".format(
+                **get_db_params()))
         con = engine.connect()
         df = df.copy()
         if len(rename) != 0:
@@ -262,13 +265,13 @@ def to_database(df, table, defaults={}, rename={}, drop=[], index_label='date'):
             df.drop(drop, axis=1, inplace=True)
         for item in defaults.items():
             df.insert(0, item[0], item[1])
-        df.to_sql(table, con, if_exists='append', index_label=index_label)
+        df.to_sql(table, con, if_exists='append', index=False if index_label is None else True, index_label=index_label)
     finally:
         if con:
             con.close()
 
 
-# collects all data about a site for specified time period, including: total production, component production, & weather
+# collects all data about a site for specified time period, including: nn production, component production, & weather
 # inserts all the data into the database
 # start, end - datetime objects
 # interval - time interval for production batches in minutes, can be 1, 10, or 60
@@ -285,7 +288,14 @@ def collect_data(site_id, start, end, interval=10):
         to_database(power_to_production(inv_data[i], 'AC Power'), "component_production",
                     {'component_id': manuf_id, 'unit': 'Wh'}, {"AC Power": "value"},
                     [c for c in inv_data[i].columns if c != 'AC Power'])  # removing all other columns
-        # run_query()  # TODO: check if component already in component_details
+
+        # check if component already in component_details; throws exception if error with the query
+        if len(run_query(
+                "SELECT * from component_details WHERE manufacturers_component_id LIKE '{}'".format(manuf_id))) == 0:
+            to_database(pd.DataFrame({'component_id': order - 1, 'manufacturers_component_id': manuf_id,
+                                      'type': 'inverter', 'sub_type': model, 'site_id': site_id,
+                                      'data_provider': 'Solectria', 'manufacturer': 'Solectria',
+                                      'is_energy_producing': True}, [0]), 'component_details', index_label=None)
 
     total_data = merge_inv_production(inv_data)
     to_database(total_data, "production",
@@ -294,4 +304,4 @@ def collect_data(site_id, start, end, interval=10):
 
 
 if __name__ == '__main__':
-    collect_data(5089, datetime(2019, 1, 1), datetime(2019, 1, 2), 1)
+    collect_data(5089, datetime(2019, 1, 1), datetime(2020, 1, 1), 60)
