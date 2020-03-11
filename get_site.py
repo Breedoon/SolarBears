@@ -40,4 +40,4 @@ for url in list_url:
 
 d = {'site': data, 'size': ans}
 df = pd.DataFrame(d)
-df.to_csv('site_size.csv')
+df.to_csv('active_site_with_size.csv')

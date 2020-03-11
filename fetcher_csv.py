@@ -1,28 +1,35 @@
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import StringIO
-from os import listdir
+import pytz
+from bs4 import BeautifulSoup
 
 import numpy as np
 import pandas as pd
 import requests
 import sqlalchemy
 from dateutil.relativedelta import relativedelta
+from requests.exceptions import ChunkedEncodingError
 
 from helper_db import get_db_params, run_query
-from helper import get_errors
+from fetcher_xml import get_site_metadata
+from helper import get_errors, plot_days, plot_error
 
 DIR = 'solectria_raw_csv'
 URL = "https://solrenview.com/cgi-bin/cgihandler.cgi"
 
-wait_time = 0.5  # seconds
+wait_time = 2  # seconds
 last_fetch = 0
 
 unit_view = {'day': '0', 'week': '1', 'month': '2', '0': 'day', '1': 'week', '2': 'month'}
 interval_unit = {'day': 1, 'week': 10, 'month': 60, 1: 'day', 10: 'week', 60: 'month'}
+timezones = {None: '', '': '', '-5:00': 'America/New_York', '-6:00': 'America/Chicago',
+             '-7:00': 'America/Denver',
+             '-8:00': 'America/Los_Angeles'}
 
-sites_data = pd.read_csv('active_sites_data.csv')
+sites_data = pd.read_csv('full_sites_data.csv')
+sites_data['site_id'] = sites_data['site_id'].astype(int)
 sites_data.set_index('site_id', inplace=True)
 
 # returns datetime rounded to the chosen unit
@@ -51,7 +58,7 @@ def store_sites(sites):
     for site in sites:
         fetch("0,0,1,1", site)
     # reading all files in DIR
-    files = [f for f in listdir(DIR)]
+    files = [f for f in os.listdir(DIR)]
     sites = [int(f[4:f.find('_')]) for f in files]
     names = [f[f.find('_') + 1:f.find('(')] for f in files]
     csv_dict = {k: v for k, v in sorted(dict(zip(sites, names)).items(), key=lambda item: item[0])}
@@ -85,6 +92,22 @@ def split_inv_name(inv_name):
     return order, manuf_id, model
 
 
+# returns meta-data about the given site
+def get_site_info(site_id):
+    # TODO: fetch individually: size, converted timezone, fetch_id
+    # xml_data = get_site_metadata(site_id)
+    # name, activation_date, address, line1, state, postal, timezone, lat, long = \
+    #     xml_data['name'], xml_data['activationDate'], xml_data['line1'], xml_data['city'], \
+    #     xml_data['state'], xml_data['postal'], xml_data['timezone'], xml_data['latitude'], xml_data['longitude'],
+
+    return sites_data['name'][site_id], sites_data['size'][site_id], sites_data['activationDate'][site_id], \
+           sites_data['line1'][site_id], sites_data['city'][site_id], sites_data['state'][site_id], \
+           sites_data['postal'][site_id], timezones[sites_data['timezone'][site_id]] \
+               if sites_data['timezone'][site_id] == sites_data['timezone'][site_id] else None, \
+           sites_data['latitude'][site_id], \
+           sites_data['longitude'][site_id], sites_data['csv_name'][site_id]  # timezone might be nan
+
+
 # returns name of a .csv file given site_id and period
 # site_id - int, view - str (e.g.: "0,1,0,0"), dt - datetime obj of the beginning of intended period
 def get_file_name(site_id, view, dt):
@@ -100,14 +123,19 @@ def get_file_name(site_id, view, dt):
 
 # returns end datetime in given timezone
 def get_timezone_time(site_id):
-    timezone = sites_data['timezone'][site_id]
-    return datetime.now()  # TODO: make it actually work
+    try:
+        timezone = timezones[sites_data['timezone'][site_id]]
+        return datetime.now(pytz.timezone(timezone))
+    except KeyError:
+        return datetime.now()
 
 
 # view - string of arguments
 def fetch(view, site_id):
-    filename = DIR + "/" + get_file_name(site_id, view, get_timezone_time(site_id))
-    tt = time.time()
+    try:
+        filename = DIR + "/" + get_file_name(site_id, view, get_timezone_time(site_id))
+    except TypeError:
+        filename = "filename unknown"
     print("Fetching: " + filename)
     if not os.path.exists(DIR):
         os.makedirs(DIR)
@@ -118,18 +146,27 @@ def fetch(view, site_id):
         last_fetch = time.time()
 
         url = URL + '?view={view}&cond=site_id={site_id}'.format(view=view, site_id=site_id)
-        s = str(requests.get(url).content)
         try:
-            new_url = "https://solrenview.com" + s[s.index('/downloads'):s.index('.csv') + 4]
-        except:
-            return ""
+            with requests.get(url) as r:
+                s = r.content
+                r.close()
+            try:
+                s = BeautifulSoup(s, "html.parser").find_all('script')[-2].text
+                new_url = "https://solrenview.com" + s[s.index('/downloads'):s.index('.csv') + 4]
+            except:
+                return ""
 
-        new_filename = DIR + '/' + new_url.split('/')[-1]  # .csv file
+            filename = DIR + '/' + new_url.split('/')[-1]  # .csv file
 
-        if new_filename != filename:  # if predicted filename is not the actual one
-            print(new_filename, filename)
+            with requests.get(new_url) as r:
+                raw = r.text
+                r.close()
 
-        raw = requests.get(new_url).text
+        except ChunkedEncodingError as e:
+            print(e)
+            time.sleep(wait_time)
+            return fetch(view, site_id)  # might not be the best solution but idk how else to fix it
+
         with open(filename, 'w+') as f:
             f.write(raw)
     else:
@@ -141,8 +178,10 @@ def fetch(view, site_id):
 # raw - str of .csv
 # returns a tuple of lists: ['inverter_name1', ...], [<dataframe>, ...]
 def parse(raw):
-    raw = raw[raw.index('inv') - 1:]  # remove the header ("Quad 7 - Phase 2...")
-
+    try:
+        raw = raw[raw.index('inv') - 1:]  # remove the header ("Quad 7 - Phase 2...")
+    except ValueError:
+        raise RuntimeError('Impossible to parse: ' + raw[:20] + "...")
     i = raw.index('Timeframe')
     raw = raw[:i] + raw[i:].replace('(', '').replace(')', '')  # turning '(null' and 'null)' into 'null'
 
@@ -173,7 +212,7 @@ def parse(raw):
     del csv, raw
 
     dfs_fin = [] * len(dfs)
-    for i in range(0, len(dfs)):
+    for i in range(len(dfs)):
         rows = np.split(dfs[i], [1, 2])  # splitting into columns (0), units (1) - unused, rest of data (2)
         main_df = rows[2]
         main_df.columns = list(rows[0].iloc[0])  # setting column names [AC Energy, AC Power, ...]
@@ -195,6 +234,31 @@ def parse(raw):
     return dfs_fin
 
 
+# inserts dataframe (df) into the database (from db_params) into given table
+# defaults - default values for columns that are in the database but not in dataframe
+# e.g.: {'site_id': 4760} to will add a column 'site_id' and puts 4760 in all rows
+# rename - specified which columns should be renamed before putting into a database
+# e.g.: {"AC Power": "value"} - replaces dataframe's column 'AC Power' with databases's 'value'
+def store(table, df, defaults={}, rename={}, drop=[], index_label=None):
+    con = None
+    try:
+        engine = sqlalchemy.create_engine(
+            "postgresql://{user}:{password}@{host}:5432/{database}".format(
+                **get_db_params(False)))
+        con = engine.connect()
+        df = df.copy()
+        if len(rename) != 0:
+            df.rename(columns=rename, inplace=True)
+        if len(drop) != 0:
+            df.drop(drop, axis=1, inplace=True)
+        for item in defaults.items():
+            df.insert(0, item[0], item[1])
+        df.to_sql(table, con, if_exists='append', index=False if index_label is None else True, index_label=index_label)
+    finally:
+        if con:
+            con.close()
+
+
 # returns a dictionary of inverter names and dataframes of their production
 # e.g.: {'inv #1 - 141894234': <dataframe>, ...}
 def get_inv_data(site_id, view):
@@ -206,7 +270,8 @@ def get_inv_data(site_id, view):
 # end - end datetime at the timezone
 # time_unit - 'day', 'week', or 'month' in which data will be fetched
 # 'day': 1-minute intervals, 'week': 10-minute intervals, 'month': 1-hour intervals
-def get_historical_data(site_id, start, end, current, time_unit='week'):
+def get_historical_data(site_id, start, end, time_unit='week'):
+    current = get_timezone_time(site_id)
     total = None
     for i in range(get_units_ago[time_unit](start, current),  # iterating through view 'ago' values
                    get_units_ago[time_unit](end - timedelta(minutes=1), current) - 1, -1):
@@ -246,62 +311,49 @@ def merge_inv_production(inv_dfs):
     return pd.DataFrame(total)
 
 
-# inserts dataframe (df) into the database (from db_params) into given table
-# defaults - default values for columns that are in the database but not in dataframe
-# e.g.: {'site_id': 4760} to will add a column 'site_id' and puts 4760 in all rows
-# rename - specified which columns should be renamed before putting into a database
-# e.g.: {"AC Power": "value"} - replaces dataframe's column 'AC Power' with databases's 'value'
-def to_database(df, table, defaults={}, rename={}, drop=[], index_label='date'):
-    con = None
-    try:
-        engine = sqlalchemy.create_engine(
-            "postgresql://{user}:{password}@{host}:5432/{database}".format(
-                **get_db_params()))
-        con = engine.connect()
-        df = df.copy()
-        if len(rename) != 0:
-            df.rename(columns=rename, inplace=True)
-        if len(drop) != 0:
-            df.drop(drop, axis=1, inplace=True)
-        for item in defaults.items():
-            df.insert(0, item[0], item[1])
-        df.to_sql(table, con, if_exists='append', index=False if index_label is None else True, index_label=index_label)
-    finally:
-        if con:
-            con.close()
-
-
 # collects all data about a site for specified time period, including: nn production, component production, & weather
 # inserts all the data into the database
 # start, end - datetime objects
 # interval - time interval for production batches in minutes, can be 1, 10, or 60
 def collect_data(site_id, start, end, interval=10):
-    inv_data = get_historical_data(site_id, start, end, get_timezone_time(site_id), interval_unit[interval])
+    try:
+        inv_data = get_historical_data(site_id, start, end, interval_unit[interval])
+    except RuntimeError:
+        return False
     if 'Weather' in inv_data[-1].columns.name:
-        to_database(inv_data[-1], 'weather',
-                    {'site_id': site_id},
-                    {"Ambient": "temperature_ambient", "Module": "temperature_module", "Irradiance": "irradiance",
-                     "Wind Direction": "wind_direction", 'Wind Speed': 'wind_speed'})
+        store('weather', inv_data[-1], {'site_id': site_id},
+              {"Ambient": "temperature_ambient", "Module": "temperature_module", "Irradiance": "irradiance",
+               "Wind Direction": "wind_direction", 'Wind Speed': 'wind_speed'}, index_label='date')
         inv_data = inv_data[:-1]  # removing weather from inverters
     for i in range(len(inv_data)):
         order, manuf_id, model = split_inv_name(inv_data[i].columns.name)
-        to_database(power_to_production(inv_data[i], 'AC Power'), "component_production",
-                    {'component_id': manuf_id, 'unit': 'Wh'}, {"AC Power": "value"},
-                    [c for c in inv_data[i].columns if c != 'AC Power'])  # removing all other columns
+        store("component_production", power_to_production(inv_data[i], 'AC Power'),
+              {'component_id': manuf_id, 'unit': 'Wh'}, {"AC Power": "value"},
+              [c for c in inv_data[i].columns if c != 'AC Power'], index_label='date')  # removing all other columns
 
         # check if component already in component_details; throws exception if error with the query
         if len(run_query(
                 "SELECT * from component_details WHERE manufacturers_component_id LIKE '{}'".format(manuf_id))) == 0:
-            to_database(pd.DataFrame({'component_id': order - 1, 'manufacturers_component_id': manuf_id,
-                                      'type': 'inverter', 'sub_type': model, 'site_id': site_id,
-                                      'data_provider': 'Solectria', 'manufacturer': 'Solectria',
-                                      'is_energy_producing': True}, [0]), 'component_details', index_label=None)
+            # TODO: check if inverter/site works
+            store('component_details', pd.DataFrame(
+                {'component_id': order - 1, 'manufacturers_component_id': manuf_id, 'type': 'inverter',
+                 'sub_type': model, 'site_id': site_id, 'data_provider': 'Solectria', 'manufacturer': 'Solectria',
+                 'is_energy_producing': True}, [0]), index_label=None)
 
     total_data = merge_inv_production(inv_data)
-    to_database(total_data, "production",
-                {'site_id': site_id, 'unit': 'Wh', 'measured_by': 'INVERTER'}, {"AC Power": "value"},
-                [c for c in total_data.columns if c != 'AC Power'])
+    store("production", total_data, {'site_id': site_id, 'unit': 'Wh', 'measured_by': 'INVERTER'},
+          {"AC Power": "value"}, [c for c in total_data.columns if c != 'AC Power'], index_label='date')
+    if len(run_query("SELECT * from site WHERE site_id LIKE '{}'".format(site_id))) == 0:
+        name, size, installation_date, address, city, state, zip, timezone, lat, long, fetch_id = get_site_info(site_id)
+        store('site', pd.DataFrame(
+            {'site_id': site_id, 'name': name, 'status': 'Active', 'size': size, 'installation_date': installation_date,
+             'address': address, 'city': city, 'state': state, 'zip': zip, 'timezone': timezone, 'latitude': lat,
+             'longitude': long, 'fetch_id': fetch_id}, [0]), index_label=None)
+    return True
 
 
 if __name__ == '__main__':
-    collect_data(5089, datetime(2019, 1, 1), datetime(2020, 1, 1), 60)
+    from numpy.random import choice
+
+    for site in choice(sites_data.index, 50):
+        print(site, collect_data(site, datetime(2020, 1, 1), datetime(2020, 1, 10), 10))

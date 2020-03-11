@@ -11,12 +11,16 @@ DIR = 'active_sites_xml'
 URL = "http://solrenview.com/xmlfeed/ss-xmlN.php"
 wait_time = 0  # seconds
 last_fetch = 0
+metadata_tags = ['name', 'activationDate', 'latitude', 'longitude', 'line1', 'city', 'state', 'postal', 'timezone']
 
 site_ids = [4760, 5582, 5077]
 
 
 def get_params(site_id, start, end):
-    return {'site_id': str(site_id), 'ts_start': start.isoformat(), 'ts_end': end.isoformat()}
+    if start:  # if None
+        return {'site_id': str(site_id), 'ts_start': start.isoformat(), 'ts_end': end.isoformat()}
+    else:
+        return {'site_id': str(site_id)}
 
 
 def get_file_name(params):
@@ -37,6 +41,8 @@ def fetch(site_id, start, end):
         last_fetch = time.time()
         r = requests.get(URL, params=params)
         raw = r.text
+        if 'Invalid site id' in raw or 'Invalid XMLfeed request' in raw or len(raw) == 0:
+            return ''
         with open(filename, 'w+') as f:
             f.write(raw)
     else:
@@ -48,7 +54,7 @@ def fetch(site_id, start, end):
 
 # returns datetimes to get stored active sites xml
 def get_stored_datetimes():
-    return datetime(2000, 1, 1), datetime(2020, 1, 1)
+    return None, None
 
 
 def get_hourly_production(site_id, start, end):
@@ -59,24 +65,31 @@ def get_hourly_production(site_id, start, end):
     print(production)
 
 
-# fetches active sites metadata, stores it in a csv
-def check_metadata(active_sites):
-    sites_xmls = {}
-    for site in active_sites:
-        xml = fetch(site, *get_stored_datetimes())
-        if xml:  # if xml is not empty
-            sites_xmls[site] = ET.fromstring(xml)
-    interest_tags = ['name', 'activationDate', 'latitude', 'longitude', 'line1', 'city', 'state', 'postal',
-                     'timezone']
-    df = pd.DataFrame(index=sites_xmls.keys(), columns=interest_tags)
-    for i in sites_xmls:
-        for tag in interest_tags:
-            res = sites_xmls[i].find(".//" + tag).text
-            if res:
-                df[tag][i] = res.strip().replace('?', '')
-            else:
-                df[tag][i] = ""
+def get_site_metadata(site_id):
+    raw = fetch(site_id, *get_stored_datetimes())
+    if not raw:  # if xml is empty
+        return None
+    xml = ET.fromstring(raw)
 
+    vals = {}
+    for tag in metadata_tags:
+        res = xml.find(".//" + tag).text
+        if res:
+            vals[tag] = res.strip().replace('?', '')
+        else:
+            vals[tag] = ""
+    return vals
+
+
+# fetches active sites metadata, stores it in a csv
+def get_active_sites_metadata(active_sites):
+    df = pd.DataFrame(columns=metadata_tags)
+
+    for site in active_sites:
+        data = get_site_metadata(site)
+        if not data:  # if None
+            continue
+        df = df.append(pd.Series(data, name=site))
     df.to_csv('active_sites_data.csv')
     return df
 
@@ -84,20 +97,20 @@ def check_metadata(active_sites):
 def get_active_sites(filename='active_sites.txt'):
     with open(filename, 'r') as f:
         sites = f.readlines()
-        sites = [int(s.strip()) for s in sites]  # removing '\n' at the end
+        sites = [int(s.strip()) for s in sites]  # removing '\t' at the end
         return sites
 
 
-def fetch_active_sites():
-    sites = get_active_sites()
+def fetch_active_sites(sites):
+    # sites = get_active_sites()
     for site in sites:
         while True:  # to try fetching until no error
             try:
-                fetch(site, datetime(2000, 1, 1), datetime(2020, 1, 1))
+                fetch(site, *get_stored_datetimes())
             except requests.exceptions.ConnectionError:
                 print('Interrupted')
                 try:
-                    os.remove(get_file_name(get_params(site, datetime(2000, 1, 1), datetime(2020, 1, 1))))
+                    os.remove(get_file_name(get_params(site, *get_stored_datetimes())))
                 except:
                     pass
                 time.sleep(6.0)
@@ -107,4 +120,5 @@ def fetch_active_sites():
 
 
 if __name__ == '__main__':
-    check_metadata(get_active_sites())
+    fetch_active_sites(list(range(6000)))  # TODO: refetch all sites
+

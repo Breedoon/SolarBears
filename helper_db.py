@@ -79,7 +79,10 @@ table_queries = {
             state CHAR(2),
             zip VARCHAR(12),
             timezone VARCHAR(50),
+            latitude numeric,
+            longitude numeric,
             owner_id VARCHAR(20),
+            fetch_id VARCHAR(50),
             created_on TIMESTAMP default NOW()
    
             );
@@ -148,5 +151,4 @@ def test_connection(cloud_connect=True):
 
 
 if __name__ == '__main__':
-    print(run_query("SELECT * from production LIMIT 10"))
     create_tables()
