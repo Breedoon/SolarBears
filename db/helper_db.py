@@ -1,6 +1,6 @@
 import psycopg2
 import psycopg2.extras
-from config_db import config_db
+from db.config_db import config_db
 
 table_queries = {
     'component_production': ["""
@@ -84,7 +84,6 @@ table_queries = {
             owner_id VARCHAR(20),
             fetch_id VARCHAR(50),
             created_on TIMESTAMP default NOW()
-   
             );
         """],
     'site_owner': [""" DROP TABLE IF EXISTS public.site_owner CASCADE; 
@@ -111,7 +110,7 @@ def create_tables(cloud_connect=True):
 
 def get_db_params(cloud_connect=True):
     if cloud_connect:
-        return config_db(filename='cloudsql.ini')
+        return config_db(filename='database.ini')
     else:
         return config_db(filename='database.ini')
 

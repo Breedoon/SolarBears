@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from datetime import datetime, timedelta
 
-PLOTS_DIR = ''
+PLOTS_DIR = './dataviz'
 
 colors = []
 

@@ -1,13 +1,11 @@
 import os
 import time
 import xml.etree.ElementTree as ET
-import lxml
-from datetime import datetime, timedelta
-from helper import plot_days, time_batches
+from misc.helper import plot_days, time_batches
 import requests
 import pandas as pd
 
-DIR = 'active_sites_xml'
+DIR = './solectria_raw_xml'
 URL = "http://solrenview.com/xmlfeed/ss-xmlN.php"
 wait_time = 0  # seconds
 last_fetch = 0
@@ -41,10 +39,13 @@ def fetch(site_id, start, end):
         last_fetch = time.time()
         r = requests.get(URL, params=params)
         raw = r.text
-        if 'Invalid site id' in raw or 'Invalid XMLfeed request' in raw or len(raw) == 0:
+        if 'Invalid site id' in raw or 'Invalid XMLfeed request' in raw or 'Unknown or bad timezone' in raw or len(raw) == 0:
             return ''
         with open(filename, 'w+') as f:
-            f.write(raw)
+            try:
+                f.write(raw)
+            except UnicodeEncodeError:
+                return fetch(site_id, start, end)
     else:
         with open(filename, 'r') as f:
             raw = f.read()
@@ -52,7 +53,7 @@ def fetch(site_id, start, end):
     return raw
 
 
-# returns datetimes to get stored active sites xml
+# returns datetimes to get stored active solectria_sites xml
 def get_stored_datetimes():
     return None, None
 
@@ -69,7 +70,11 @@ def get_site_metadata(site_id):
     raw = fetch(site_id, *get_stored_datetimes())
     if not raw:  # if xml is empty
         return None
-    xml = ET.fromstring(raw)
+    try:
+        xml = ET.fromstring(raw)
+    except ET.ParseError:
+        print(site_id)
+        return None
 
     vals = {}
     for tag in metadata_tags:
@@ -81,7 +86,7 @@ def get_site_metadata(site_id):
     return vals
 
 
-# fetches active sites metadata, stores it in a csv
+# fetches active solectria_sites metadata, stores it in a csv
 def get_active_sites_metadata(active_sites):
     df = pd.DataFrame(columns=metadata_tags)
 
@@ -90,7 +95,7 @@ def get_active_sites_metadata(active_sites):
         if not data:  # if None
             continue
         df = df.append(pd.Series(data, name=site))
-    df.to_csv('active_sites_data.csv')
+    df.to_csv('active_sites_data.csv', index_label='site_id')
     return df
 
 
@@ -102,7 +107,7 @@ def get_active_sites(filename='active_sites.txt'):
 
 
 def fetch_active_sites(sites):
-    # sites = get_active_sites()
+    # solectria_sites = get_active_sites()
     for site in sites:
         while True:  # to try fetching until no error
             try:
@@ -120,5 +125,5 @@ def fetch_active_sites(sites):
 
 
 if __name__ == '__main__':
-    fetch_active_sites(list(range(6000)))  # TODO: refetch all sites
+    get_active_sites_metadata(get_active_sites())
 

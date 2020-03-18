@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from io import StringIO
 import pytz
 from bs4 import BeautifulSoup
@@ -12,11 +12,10 @@ import sqlalchemy
 from dateutil.relativedelta import relativedelta
 from requests.exceptions import ChunkedEncodingError
 
-from helper_db import get_db_params, run_query
-from fetcher_xml import get_site_metadata
-from helper import get_errors, plot_days, plot_error
+from db.helper_db import get_db_params, run_query
+from fetchers.fetcher_xml import get_active_sites
 
-DIR = 'solectria_raw_csv'
+DIR = './solectria_raw_csv'
 URL = "https://solrenview.com/cgi-bin/cgihandler.cgi"
 
 wait_time = 2  # seconds
@@ -28,7 +27,7 @@ timezones = {None: '', '': '', '-5:00': 'America/New_York', '-6:00': 'America/Ch
              '-7:00': 'America/Denver',
              '-8:00': 'America/Los_Angeles'}
 
-sites_data = pd.read_csv('full_sites_data.csv')
+sites_data = pd.read_csv('./csv/solectria_sites.csv')
 sites_data['site_id'] = sites_data['site_id'].astype(int)
 sites_data.set_index('site_id', inplace=True)
 
@@ -53,7 +52,7 @@ get_date_ago = {'day': lambda target, n: round_dt['day'](target) - timedelta(day
                 'month': lambda target, n: round_dt['month'](target) - relativedelta(months=n)}
 
 
-# modifies active_sites_data.csv by adding a column to the sites available for .csv fetch
+# modifies active_sites_data.csv by adding a column to the solectria_sites available for .csv fetch
 def store_sites(sites):
     for site in sites:
         fetch("0,0,1,1", site)
@@ -63,7 +62,7 @@ def store_sites(sites):
     names = [f[f.find('_') + 1:f.find('(')] for f in files]
     csv_dict = {k: v for k, v in sorted(dict(zip(sites, names)).items(), key=lambda item: item[0])}
 
-    # reading sites metadata file
+    # reading solectria_sites metadata file
     df = pd.read_csv('active_sites_data.csv')
     df.set_index(df.columns[0], inplace=True)
     df.insert(9, 'csv_name', '')
@@ -72,8 +71,8 @@ def store_sites(sites):
             df['csv_name'][site_id] = csv_dict[site_id]
         else:
             df = pd.concat([df, pd.DataFrame({'csv_name': csv_dict[site_id]}, [site_id])])
-    df.sort_index(inplace=True)
-    df['csv_name'] = df['csv_name']  # idk why it works but without this there's only 300 csv_names committed out of 800
+    # df.sort_index(inplace=True)
+    # df['csv_name'] = df['csv_name']  # idk why it works but without this there's only 300 csv_names committed out of 800
     df.to_csv('active_sites_data.csv')
 
 
@@ -134,7 +133,7 @@ def get_timezone_time(site_id):
 def fetch(view, site_id):
     try:
         filename = DIR + "/" + get_file_name(site_id, view, get_timezone_time(site_id))
-    except TypeError:
+    except (KeyError, TypeError):
         filename = "filename unknown"
     print("Fetching: " + filename)
     if not os.path.exists(DIR):
@@ -181,7 +180,7 @@ def parse(raw):
     try:
         raw = raw[raw.index('inv') - 1:]  # remove the header ("Quad 7 - Phase 2...")
     except ValueError:
-        raise RuntimeError('Impossible to parse: ' + raw[:20] + "...")
+        raise RuntimeError('Impossible to parse: ' + raw + "...")
     i = raw.index('Timeframe')
     raw = raw[:i] + raw[i:].replace('(', '').replace(')', '')  # turning '(null' and 'null)' into 'null'
 
@@ -192,12 +191,12 @@ def parse(raw):
         j = raw.index('Weather')
         i = raw[j:].index(')')  # last character on line with inverters
         raw = raw[:i + j + 1] + ',,,,' + raw[
-                                         i + j + 1:]  # adding comas to the end of Weather, otherwise it skews the index
+                                         i + j + 1:]  # adding comas to the end of Weather, otherwise it skews the site_id
     # indexes of inverters to split vertically; - 1 because timeframe is removed later
     indexes = [i - 1 for i in range(len(inverters_raw)) if inverters_raw[i] != '' and i != 1]
 
     csv = pd.read_csv(StringIO(raw))
-    # setting timeframe as an index (instead of 0, 1, ...) and removing brackets: e.g.: '[2019-...:00]' -> '2019-...:00'
+    # setting timeframe as an site_id (instead of 0, 1, ...) and removing brackets: e.g.: '[2019-...:00]' -> '2019-...:00'
     csv.set_index(csv.columns[0], inplace=True)
 
     # dfs = np.split(csv, indexes, axis=1)  # ineffective, takes about 0.4s
@@ -259,10 +258,16 @@ def store(table, df, defaults={}, rename={}, drop=[], index_label=None):
             con.close()
 
 
-# returns a dictionary of inverter names and dataframes of their production
-# e.g.: {'inv #1 - 141894234': <dataframe>, ...}
-def get_inv_data(site_id, view):
+# returns dataframes of inverter production production
+def get_inv_production(site_id, view):
     return parse(fetch(view, site_id))
+
+
+# returns dataframe of site production combined from its inverters
+# start, end - datetime objects
+# interval - time interval for production batches in minutes, can be 1, 10, or 60
+def get_site_production(site_id, start, end, time_interval=10):
+    return merge_inv_production(get_historical_data(site_id, start, end, interval_unit[time_interval]))
 
 
 # returns a dataframe of 10-minute production batches [start, end)
@@ -275,7 +280,7 @@ def get_historical_data(site_id, start, end, time_unit='week'):
     total = None
     for i in range(get_units_ago[time_unit](start, current),  # iterating through view 'ago' values
                    get_units_ago[time_unit](end - timedelta(minutes=1), current) - 1, -1):
-        data = get_inv_data(site_id, "0,{},{},1".format(unit_view[time_unit], i))
+        data = get_inv_production(site_id, "0,{},{},1".format(unit_view[time_unit], i))
         if not total:  # if first append
             total = data
             continue
@@ -289,7 +294,7 @@ def get_historical_data(site_id, start, end, time_unit='week'):
 
 # converts a dataframe column of power in W to production in Wh
 def power_to_production(power, column):
-    # time interval in seconds for conversion to watts; based on index[1] - index[0]
+    # time interval in seconds for conversion to watts; based on site_id[1] - site_id[0]
     interval = sum((np.array(list(map(int, power.index[1].split(' ')[1].split(':'))))
                     - np.array(list(map(int, power.index[0].split(' ')[1].split(':')))))
                    * np.array([3600, 60, 1]))
@@ -351,9 +356,3 @@ def collect_data(site_id, start, end, interval=10):
              'longitude': long, 'fetch_id': fetch_id}, [0]), index_label=None)
     return True
 
-
-if __name__ == '__main__':
-    from numpy.random import choice
-
-    for site in choice(sites_data.index, 50):
-        print(site, collect_data(site, datetime(2020, 1, 1), datetime(2020, 1, 10), 10))

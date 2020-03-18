@@ -1,16 +1,17 @@
 import pandas as pd
-data = pd.read_csv('../active_sites_data.csv')
+
+data = pd.read_csv('active_sites_data.csv')
 data = data['site_id']
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
 import time
-URL = 'https://solrenview.com/SolrenView/mainFr.php?siteId=' #website
+
+URL = 'https://solrenview.com/SolrenView/mainFr.php?siteId='  # website
 list_url = []
 for i in data:
     url = URL + str(i)
     list_url.append(url)
-
 
 driver = webdriver.Firefox(executable_path='geckodriver.exe')
 
@@ -29,15 +30,17 @@ def get_info(url):
     val = table.findAll('td')[1].text  # get size
     return val[:-6]
 
-ans = []
-for url in list_url:
-    try:
-        x = get_info(url)
-        ans.append(x)
-    except:
-        x = None
-        ans.append(x)
 
-d = {'site': data, 'size': ans}
-df = pd.DataFrame(d)
-df.to_csv('active_site_with_size.csv')
+if __name__ == '__main__':
+    ans = []
+    for url in list_url:
+        try:
+            x = get_info(url)
+            ans.append(x)
+        except:
+            x = None
+            ans.append(x)
+
+    d = {'site': data, 'size': ans}
+    df = pd.DataFrame(d)
+    df.to_csv('active_site_with_size.csv')

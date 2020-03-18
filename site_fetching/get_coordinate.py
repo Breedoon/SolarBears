@@ -1,4 +1,8 @@
-def get_coordinates(line1, city, state, postal):
+import json
+import requests
+
+
+def get_coordinates(line1, city, state, postal, api_key="YOUR_API_KEY"):
     # change type to string
     line1 = str(line1)
     city = str(city)
@@ -16,7 +20,7 @@ def get_coordinates(line1, city, state, postal):
         # clean and format address
         address = address.replace(' ', '+')
         address = address.replace('#', '')
-        address += '&key=YOUR_API_KEY'  # <-------- ADD API KEY HERE
+        address += '&key=' + api_key  # <-------- ADD API KEY HERE
 
         # get url
         url = url + address
