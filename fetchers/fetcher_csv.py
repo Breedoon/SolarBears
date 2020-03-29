@@ -239,12 +239,11 @@ def parse(raw):
 # rename - specified which columns should be renamed before putting into a database
 # e.g.: {"AC Power": "value"} - replaces dataframe's column 'AC Power' with databases's 'value'
 def store(table, df, defaults={}, rename={}, drop=[], index_label=None):
-    con = None
+    conn = None
     try:
         engine = sqlalchemy.create_engine(
-            "postgresql://{user}:{password}@{host}:5432/{database}".format(
-                **get_db_params(False)))
-        con = engine.connect()
+            "postgresql://{user}:{password}@{host}:5432/{database}".format(**get_db_params()))
+        conn = engine.connect()
         df = df.copy()
         if len(rename) != 0:
             df.rename(columns=rename, inplace=True)
@@ -252,10 +251,9 @@ def store(table, df, defaults={}, rename={}, drop=[], index_label=None):
             df.drop(drop, axis=1, inplace=True)
         for item in defaults.items():
             df.insert(0, item[0], item[1])
-        df.to_sql(table, con, if_exists='append', index=False if index_label is None else True, index_label=index_label)
+        df.to_sql(table, conn, if_exists='append', index=False if index_label is None else True, index_label=index_label)
     finally:
-        if con:
-            con.close()
+        conn = None
 
 
 # returns dataframes of inverter production production
@@ -355,4 +353,3 @@ def collect_data(site_id, start, end, interval=10):
              'address': address, 'city': city, 'state': state, 'zip': zip, 'timezone': timezone, 'latitude': lat,
              'longitude': long, 'fetch_id': fetch_id}, [0]), index_label=None)
     return True
-

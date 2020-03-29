@@ -11,8 +11,6 @@ wait_time = 0  # seconds
 last_fetch = 0
 metadata_tags = ['name', 'activationDate', 'latitude', 'longitude', 'line1', 'city', 'state', 'postal', 'timezone']
 
-site_ids = [4760, 5582, 5077]
-
 
 def get_params(site_id, start, end):
     if start:  # if None
@@ -122,8 +120,4 @@ def fetch_active_sites(sites):
                 continue
             else:
                 break
-
-
-if __name__ == '__main__':
-    get_active_sites_metadata(get_active_sites())
 

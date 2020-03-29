@@ -2,8 +2,12 @@ from colour import Color
 import matplotlib.pyplot as plt
 import numpy as np
 from datetime import datetime, timedelta
+import os
 
 PLOTS_DIR = './dataviz'
+
+if not os.path.exists(PLOTS_DIR):
+    os.makedirs(PLOTS_DIR)
 
 colors = []
 

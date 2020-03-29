@@ -1,5 +1,6 @@
 import psycopg2
 import psycopg2.extras
+import pandas as pd
 from db.config_db import config_db
 
 table_queries = {
@@ -100,53 +101,49 @@ table_queries = {
 }
 
 
-def create_tables(cloud_connect=True):
+def create_tables():
     queries = []
     for table in table_queries:
         queries += table_queries[table]
-    run_queries(queries, cloud_connect=cloud_connect)
+    run_queries(queries)
     return True
 
 
-def get_db_params(cloud_connect=True):
-    if cloud_connect:
-        return config_db(filename='database.ini')
-    else:
-        return config_db(filename='database.ini')
+def get_db_params():
+    return config_db(filename='./db/database.ini')
 
 
-def run_queries(commands, cloud_connect=True):
+# if retrieve == True, tries to return dataframe for each command; throws an error if one of the commands is not SELECT
+def run_queries(commands, retrieve=False):
     conn = None
     try:
-        params = get_db_params(cloud_connect)
+        params = get_db_params()
         conn = psycopg2.connect(**params)
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         results = [] * len(commands)
-        for command in commands:
-            cur.execute(command)
-            if cur.description:  # if 'description' is not None - there is something to fetch
-                results.append(cur.fetchall())
-            else:
-                results.append(None)
-        cur.close()
+        if retrieve:
+            for command in commands:
+                results.append(pd.read_sql_query(command, conn))
+        else:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            for command in commands:
+                cur.execute(command)
+                if cur.description:  # if 'description' is not None - there is something to fetch
+                    results.append(cur.fetchall())
+                else:
+                    results.append(None)
+            cur.close()
         conn.commit()
         return results
     except psycopg2.DatabaseError as error:
         print(error)
         return None
     finally:
-        if conn:  # if not None
-            conn.close()
+        conn = None
 
 
-def run_query(command, cloud_connect=True):
-    result = run_queries([command], cloud_connect)
+def run_query(command, retrieve=False):
+    result = run_queries([command], retrieve)
     return None if result is None else result[0]
-
-
-def test_connection(cloud_connect=True):
-    sql = ("""SELECT 1;""", """SELECT 2;""")
-    return True if run_queries(sql, cloud_connect=cloud_connect) is not None else False
 
 
 if __name__ == '__main__':
