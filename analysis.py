@@ -1,11 +1,17 @@
+import time
+
 import pandas as pd
 from site_fetching.get_coordinate import get_coordinates
 import geopy.distance
 import numpy as np
+from scipy.stats import ttest_ind
 from datetime import datetime
-from fetchers.fetcher_csv import get_site_production, collect_data
+from dateutil.relativedelta import relativedelta
+import matplotlib.pyplot as plt
 
-from db.helper_db import run_query
+from fetchers.fetcher_csv import get_site_production, collect_data
+from db.helper_db import run_query, run_queries
+from misc.helper import time_batches
 
 
 def random_closest():
@@ -33,24 +39,51 @@ def random_closest():
     get_site_production(min_site_id, datetime(2019, 1, 1), datetime(2020, 1, 1)).to_csv('temp.csv')
 
 
-# production - dataframe with columns 'value' and 'date' meaning production in Wh and date in format 2020-01-20 10:00:00
-def df_to_efficiency(production, size):
+# production - dataframe with columns 'value' and 'date' for production in Wh and date in format '2020-01-20 10:00:00'
+# if interval == None, assumes production is sorted by 'date', and calculates interval based on first two 'date's
+def df_to_efficiency(production, size, interval=None):
     # time interval in seconds for conversion to watts; based on production[1] - production[0]
-    interval = sum((np.array(list(map(int, str(production['date'][1]).split(' ')[1].split(':'))))
+    if not interval:
+        interval = sum((np.array(list(map(int, str(production['date'][1]).split(' ')[1].split(':'))))
                     - np.array(list(map(int, str(production['date'][0]).split(' ')[1].split(':')))))
                    * np.array([3600, 60, 1]))
-    production['efficiency'] = production['value'].div(interval / 3600 * size)  # eff = W / W_max (size); W = Wh / h
+    # efficiency = W / W_max; W = Wh / h; W_max = system size * 1000 (kW to W)
+    production['efficiency'] = production['value'].div(interval / 3600 * size * 1000)
+    production['efficiency'].fillna(0, inplace=True)
     return production
 
 
-if __name__ == '__main__':
-    site_id = 606333
-    start = datetime(2018, 10, 1)
-    end = datetime(2019, 1, 1)
-    # collect_data(site_id, start, end, 60)
-    data = run_query("SELECT * FROM production WHERE site_id = '{}' AND date "
-                     "BETWEEN '{}'::timestamp and '{}'::timestamp"
-                     .format(site_id, str(start), str(end)), True)
-    site_metadata = run_query("SELECT * FROM site WHERE site_id = '{}'".format(site_id))[0]
-    efficiency = df_to_efficiency(data, float(site_metadata['size']))
+# production - dataframe with columns 'value' and 'date' for production in Wh and date in format '2020-01-20 10:00:00'
+# interval in seconds
+def daily_efficiency(production, size, interval):
+    efficiency = df_to_efficiency(production, size, interval)
+    result = {}
+    n_points = {}
+    for eff, date in zip(efficiency['efficiency'], efficiency['date']):
+        try:
+            result[datetime(date.year, date.month, date.day)] += eff
+            n_points[datetime(date.year, date.month, date.day)] += 1
+        except KeyError:
+            result[datetime(date.year, date.month, date.day)] = eff
+            n_points[datetime(date.year, date.month, date.day)] = 1
+    for dt in result:
+        result[dt] = result[dt] / n_points[dt]
+    return pd.DataFrame(data=list(result.values()), index=result.keys(), columns=['value'])
 
+
+if __name__ == '__main__':
+    site_ids = [605934, 605990, 606333, 613895, 615959, 635389, 659086, 691203, 695265, 703541, 704131, 748679]
+    start = datetime(2018, 1, 1)
+    end = datetime(2019, 1, 1)
+    # collect_data(site_id, start, end, 60)  # for solectria sites
+    datas = run_queries(["SELECT * FROM production WHERE site_id = '{}' AND date "
+                         "BETWEEN '{}'::timestamp and '{}'::timestamp"
+                        .format(site_id, str(start), str(end - relativedelta(minutes=1)))
+                         for site_id in site_ids], True)
+    site_metadatas = run_queries(["SELECT * FROM site WHERE site_id = '{}'".format(site_id) for site_id in site_ids])
+    system_sizes = [float(site_metadata[0]['size']) for site_metadata in site_metadatas]
+    efficiencies = [daily_efficiency(data, system_size, 15 * 60) for data, system_size in zip(datas, system_sizes)]
+
+    print("P-value:", ttest_ind(efficiencies[0]['value'], efficiencies[1]['value'])[1])
+    plt.hist(efficiencies[1]['value'])
+    plt.show()

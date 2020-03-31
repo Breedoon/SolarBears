@@ -1,7 +1,7 @@
 from colour import Color
 import matplotlib.pyplot as plt
 import numpy as np
-from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 import os
 
 PLOTS_DIR = './dataviz'
@@ -87,8 +87,10 @@ def plot_days(production, entries_per_day=24, filename='day_plot'):
     fig.savefig(PLOTS_DIR + "/" + filename + ".png", dpi=1000)
 
 
-# [start, end)
-def time_batches(start, end, interval={'hours': 1}):
+# 'start' and 'end' - datetime or timestamp
+def time_batches(start, end, interval={'hours': 1}, include_end=False):
     while end > start:
-        yield start, start + timedelta(**interval)
-        start += timedelta(**interval)
+        yield start, start + relativedelta(**interval)
+        start += relativedelta(**interval)
+    if include_end:  # when start == end, yield end
+        start, start + relativedelta(**interval)
