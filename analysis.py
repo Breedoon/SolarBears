@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 from fetchers.fetcher_csv import get_site_production, collect_data
 from db.helper_db import run_query, run_queries
-from misc.helper import time_batches
+from misc.mapper import plot_map
 
 
 def random_closest():
@@ -45,8 +45,8 @@ def df_to_efficiency(production, size, interval=None):
     # time interval in seconds for conversion to watts; based on production[1] - production[0]
     if not interval:
         interval = sum((np.array(list(map(int, str(production['date'][1]).split(' ')[1].split(':'))))
-                    - np.array(list(map(int, str(production['date'][0]).split(' ')[1].split(':')))))
-                   * np.array([3600, 60, 1]))
+                        - np.array(list(map(int, str(production['date'][0]).split(' ')[1].split(':')))))
+                       * np.array([3600, 60, 1]))
     # efficiency = W / W_max; W = Wh / h; W_max = system size * 1000 (kW to W)
     production['efficiency'] = production['value'].div(interval / 3600 * size * 1000)
     production['efficiency'].fillna(0, inplace=True)
@@ -71,11 +71,10 @@ def daily_efficiency(production, size, interval):
     return pd.DataFrame(data=list(result.values()), index=result.keys(), columns=['value'])
 
 
-if __name__ == '__main__':
-    site_ids = [605934, 605990, 606333, 613895, 615959, 635389, 659086, 691203, 695265, 703541, 704131, 748679]
-    start = datetime(2018, 1, 1)
-    end = datetime(2019, 1, 1)
-    # collect_data(site_id, start, end, 60)  # for solectria sites
+# conducts a two-tailed t-test comparing two
+# 'sites_1' and 'sites_2' - lists of site_ids; 'start', 'end' - datetime objects
+def compare(sites_1, sites_2, start, end):
+    site_ids = sites_1 + sites_2
     datas = run_queries(["SELECT * FROM production WHERE site_id = '{}' AND date "
                          "BETWEEN '{}'::timestamp and '{}'::timestamp"
                         .format(site_id, str(start), str(end - relativedelta(minutes=1)))
@@ -83,7 +82,19 @@ if __name__ == '__main__':
     site_metadatas = run_queries(["SELECT * FROM site WHERE site_id = '{}'".format(site_id) for site_id in site_ids])
     system_sizes = [float(site_metadata[0]['size']) for site_metadata in site_metadatas]
     efficiencies = [daily_efficiency(data, system_size, 15 * 60) for data, system_size in zip(datas, system_sizes)]
+    total_effs = [np.mean(eff['value']) for eff in
+                  efficiencies]  # taking a mean efficiency for each site over the whole period
+    eff_1 = total_effs[:len(sites_1)]
+    eff_2 = total_effs[len(sites_1):]
+    return ttest_ind(eff_1, eff_2)[1]
 
-    print("P-value:", ttest_ind(efficiencies[0]['value'], efficiencies[1]['value'])[1])
-    plt.hist(efficiencies[1]['value'])
-    plt.show()
+
+if __name__ == '__main__':
+    # print(compare([605934, 605990, 606333, 613895, 615959, 635389], [659086, 691203, 695265, 703541, 704131, 748679],
+    #               datetime(2018, 1, 1), datetime(2019, 1, 1)))
+    solaredge_sites = pd.read_csv('csv/solaredge_sites.csv')
+    solectria_sites = pd.read_csv('csv/solectria_sites.csv')
+    solaredge_sites.insert(0, 'source', 'solaredge')
+    solectria_sites.insert(0, 'source', 'solectria')
+    df = pd.concat([solaredge_sites, solectria_sites], ignore_index=True)
+    plot_map(df)

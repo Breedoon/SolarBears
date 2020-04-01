@@ -24,17 +24,29 @@ colors = [
     'darkred',
 ]
 
-DIR = '../dataviz'
+DIR = './dataviz'
 
 if not os.path.exists(DIR):
     os.makedirs(DIR)
 
 
-def get_color(i, n):
-    global colors
-    if len(colors) == 0:
-        colors = [c.get_hex_l() for c in Color('red').range_to(Color('purple'), n)]
-    return colors[i]
+def get_color(size, source):
+    if source == 'solaredge':
+        if size < 10:
+            return "lightgreen"
+        if size < 100:
+            return "green"
+        if size < 1000:
+            return "darkgreen"
+    if source == 'solectria':
+        if size < 10:
+            return "pink"
+        if size < 100:
+            return "purple"
+        if size < 1000:
+            return "darkpurple"
+        return 'red'
+    return 'beige'
 
 
 def get_lat_long(address, city, state, zip):
@@ -74,22 +86,14 @@ def plot_map(df):
     # production ratio demo
     demo_map = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=3)
     fg = folium.FeatureGroup(name='Solar Locations')
-    max_size = int(np.log2(np.nanmax(df['size']))) + 1
-    for lat, lon, site_id, size in zip(df['latitude'], df['longitude'], df['site_id'], df['size']):
+    for lat, lon, site_id, size, source in zip(df['latitude'], df['longitude'], df['site_id'], df['size'], df['source']):
         try:
             if size != size:  # if nan
                 raise ValueError
             fg.add_child(folium.Marker(location=[lat, lon],
-                                       popup=(folium.Popup(str(site_id) + '\n size: ' + str(size))),
-                                       icon=folium.Icon(color=get_color(int(np.log2(size)), max_size), icon_color='black')))
+                                       popup=(folium.Popup(source + '\n' + str(site_id) + '\n size: ' + str(size))),
+                                       icon=folium.Icon(color=get_color(size, source), icon_color='black')))
         except ValueError:
             print('Skipped: ', site_id)
     demo_map.add_child(fg)
     demo_map.save(DIR + '/sites_map.html')
-
-
-if __name__ == '__main__':
-    path = '../csv/solaredge_sites.csv'
-    # df = pd.read_csv('../csv/solectria_sites.csv')
-    df = initial_data_load(path)
-    plot_map(df)
