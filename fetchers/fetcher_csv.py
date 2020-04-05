@@ -15,7 +15,7 @@ from requests.exceptions import ChunkedEncodingError
 from db.helper_db import get_db_params, run_query
 from fetchers.fetcher_xml import get_active_sites
 
-DIR = './solectria_raw_csv'
+DIR = 'solectria_raw_csv'
 URL = "https://solrenview.com/cgi-bin/cgihandler.cgi"
 
 wait_time = 2  # seconds
@@ -23,9 +23,6 @@ last_fetch = 0
 
 unit_view = {'day': '0', 'week': '1', 'month': '2', '0': 'day', '1': 'week', '2': 'month'}
 interval_unit = {'day': 1, 'week': 10, 'month': 60, 1: 'day', 10: 'week', 60: 'month'}
-timezones = {None: '', '': '', '-5:00': 'America/New_York', '-6:00': 'America/Chicago',
-             '-7:00': 'America/Denver',
-             '-8:00': 'America/Los_Angeles'}
 
 sites_data = pd.read_csv('./csv/solectria_sites.csv')
 sites_data['site_id'] = sites_data['site_id'].astype(int)
@@ -65,14 +62,14 @@ def store_sites(sites):
     # reading solectria_sites metadata file
     df = pd.read_csv('active_sites_data.csv')
     df.set_index(df.columns[0], inplace=True)
-    df.insert(9, 'csv_name', '')
+    df.insert(9, 'fetch_id', '')
     for site_id in csv_dict:
-        if site_id in df['csv_name']:
-            df['csv_name'][site_id] = csv_dict[site_id]
+        if site_id in df['fetch_id']:
+            df['fetch_id'][site_id] = csv_dict[site_id]
         else:
-            df = pd.concat([df, pd.DataFrame({'csv_name': csv_dict[site_id]}, [site_id])])
+            df = pd.concat([df, pd.DataFrame({'fetch_id': csv_dict[site_id]}, [site_id])])
     # df.sort_index(inplace=True)
-    # df['csv_name'] = df['csv_name']  # idk why it works but without this there's only 300 csv_names committed out of 800
+    # df['fetch_id'] = df['fetch_id']  # idk why it works but without this there's only 300 fetch_ids committed out of 800
     df.to_csv('active_sites_data.csv')
 
 
@@ -91,22 +88,6 @@ def split_inv_name(inv_name):
     return order, manuf_id, model
 
 
-# returns meta-data about the given site
-def get_site_info(site_id):
-    # TODO: fetch individually: size, converted timezone, fetch_id
-    # xml_data = get_site_metadata(site_id)
-    # name, activation_date, address, line1, state, postal, timezone, lat, long = \
-    #     xml_data['name'], xml_data['activationDate'], xml_data['line1'], xml_data['city'], \
-    #     xml_data['state'], xml_data['postal'], xml_data['timezone'], xml_data['latitude'], xml_data['longitude'],
-
-    return sites_data['name'][site_id], sites_data['size'][site_id], sites_data['activationDate'][site_id], \
-           sites_data['line1'][site_id], sites_data['city'][site_id], sites_data['state'][site_id], \
-           sites_data['postal'][site_id], timezones[sites_data['timezone'][site_id]] \
-               if sites_data['timezone'][site_id] == sites_data['timezone'][site_id] else None, \
-           sites_data['latitude'][site_id], \
-           sites_data['longitude'][site_id], sites_data['csv_name'][site_id]  # timezone might be nan
-
-
 # returns name of a .csv file given site_id and period
 # site_id - int, view - str (e.g.: "0,1,0,0"), dt - datetime obj of the beginning of intended period
 def get_file_name(site_id, view, dt):
@@ -116,15 +97,14 @@ def get_file_name(site_id, view, dt):
         of = str(get_date_ago[unit](dt, int(views[2])).date())
     else:
         of = get_date_ago[unit](dt, int(views[2])).date().strftime("%B %Y")
-    return "Site" + str(site_id) + "_" + sites_data['csv_name'][site_id] + '(Inverter-Direct,' + \
+    return "Site" + str(site_id) + "_" + sites_data['fetch_id'][site_id] + '(Inverter-Direct,' + \
            unit.capitalize() + ' of ' + of + ').csv'
 
 
 # returns end datetime in given timezone
 def get_timezone_time(site_id):
     try:
-        timezone = timezones[sites_data['timezone'][site_id]]
-        return datetime.now(pytz.timezone(timezone))
+        return datetime.now(pytz.timezone(sites_data['timezone'][site_id]))
     except KeyError:
         return datetime.now()
 
@@ -135,7 +115,7 @@ def fetch(view, site_id):
         filename = DIR + "/" + get_file_name(site_id, view, get_timezone_time(site_id))
     except (KeyError, TypeError):
         filename = "filename unknown"
-    print("Fetching: " + filename)
+    # print("Fetching file:", filename)
     if not os.path.exists(DIR):
         os.makedirs(DIR)
     if not os.path.exists(filename):
@@ -190,13 +170,12 @@ def parse(raw):
     if 'Weather' in inverters_raw[-1]:
         j = raw.index('Weather')
         i = raw[j:].index(')')  # last character on line with inverters
-        raw = raw[:i + j + 1] + ',,,,' + raw[
-                                         i + j + 1:]  # adding comas to the end of Weather, otherwise it skews the site_id
+        raw = raw[:i + j + 1] + ',,,,' + raw[i + j + 1:]  # adding comas to end of Weather, otherwise it skews the table
     # indexes of inverters to split vertically; - 1 because timeframe is removed later
     indexes = [i - 1 for i in range(len(inverters_raw)) if inverters_raw[i] != '' and i != 1]
 
     csv = pd.read_csv(StringIO(raw))
-    # setting timeframe as an site_id (instead of 0, 1, ...) and removing brackets: e.g.: '[2019-...:00]' -> '2019-...:00'
+    # setting timeframe as a id (instead of 0, 1, ...) and removing brackets: e.g.: '[2019-...:00]' -> '2019-...:00'
     csv.set_index(csv.columns[0], inplace=True)
 
     # dfs = np.split(csv, indexes, axis=1)  # ineffective, takes about 0.4s
@@ -251,7 +230,8 @@ def store(table, df, defaults={}, rename={}, drop=[], index_label=None):
             df.drop(drop, axis=1, inplace=True)
         for item in defaults.items():
             df.insert(0, item[0], item[1])
-        df.to_sql(table, conn, if_exists='append', index=False if index_label is None else True, index_label=index_label)
+        df.to_sql(table, conn, if_exists='append', index=False if index_label is None else True,
+                  index_label=index_label)
     finally:
         conn = None
 
@@ -279,11 +259,19 @@ def get_historical_data(site_id, start, end, time_unit='week'):
     for i in range(get_units_ago[time_unit](start, current),  # iterating through view 'ago' values
                    get_units_ago[time_unit](end - timedelta(minutes=1), current) - 1, -1):
         data = get_inv_production(site_id, "0,{},{},1".format(unit_view[time_unit], i))
+
+        # TODO: weather
+        if False not in [data[j][data[j].columns[0]].isnull().all() for j in range(len(data))]:  # if all values are nan
+            continue
+
         if not total:  # if first append
             total = data
             continue
         for j in range(len(total)):
             total[j] = pd.concat([total[j], data[j]])
+
+    if total is None:
+        raise RuntimeError('Fetched data is empty')
 
     for i in range(len(total)):  # removing rows outside of [start, end), e.g.: [mon, tue, |start, ... |, end, sat, sun]
         total[i] = total[i][np.logical_and(str(start) <= total[i].index, total[i].index < str(end))]
@@ -292,7 +280,7 @@ def get_historical_data(site_id, start, end, time_unit='week'):
 
 # converts a dataframe column of power in W to production in Wh
 def power_to_production(power, column):
-    # time interval in seconds for conversion to watts; based on site_id[1] - site_id[0]
+    # time interval in seconds for conversion to watts; based on id[1] - id[0]
     interval = sum((np.array(list(map(int, power.index[1].split(' ')[1].split(':'))))
                     - np.array(list(map(int, power.index[0].split(' ')[1].split(':')))))
                    * np.array([3600, 60, 1]))
@@ -319,10 +307,13 @@ def merge_inv_production(inv_dfs):
 # start, end - datetime objects
 # interval - time interval for production batches in minutes, can be 1, 10, or 60
 def collect_data(site_id, start, end, interval=10):
+    t = time.time()
     try:
         inv_data = get_historical_data(site_id, start, end, interval_unit[interval])
     except RuntimeError:
         return False
+    print('Time fetching & parsing:', time.time() - t)
+    t = time.time()
     if 'Weather' in inv_data[-1].columns.name:
         store('weather', inv_data[-1], {'site_id': site_id},
               {"Ambient": "temperature_ambient", "Module": "temperature_module", "Irradiance": "irradiance",
@@ -347,9 +338,14 @@ def collect_data(site_id, start, end, interval=10):
     store("production", total_data, {'site_id': site_id, 'unit': 'Wh', 'measured_by': 'INVERTER'},
           {"AC Power": "value"}, [c for c in total_data.columns if c != 'AC Power'], index_label='date')
     if len(run_query("SELECT * from site WHERE site_id LIKE '{}'".format(site_id))) == 0:
-        name, size, installation_date, address, city, state, zip, timezone, lat, long, fetch_id = get_site_info(site_id)
-        store('site', pd.DataFrame(
-            {'site_id': site_id, 'name': name, 'status': 'Active', 'size': size, 'installation_date': installation_date,
-             'address': address, 'city': city, 'state': state, 'zip': zip, 'timezone': timezone, 'latitude': lat,
-             'longitude': long, 'fetch_id': fetch_id}, [0]), index_label=None)
+        site_data = sites_data.loc[site_id].to_dict()
+        site_data['status'] = 'Active'
+        try:
+            site_data['zip'] = int(site_data['zip'])
+            if site_data['zip'] < 10000:  # if 4-digit zip
+                site_data['zip'] = '0' + str(site_data['zip'])
+        except ValueError:
+            pass
+        store('site', pd.DataFrame(site_data, [site_id]), index_label='site_id')
+    print('Time inserting into the database:', time.time() - t)
     return True

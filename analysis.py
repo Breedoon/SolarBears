@@ -5,38 +5,63 @@ from site_fetching.get_coordinate import get_coordinates
 import geopy.distance
 import numpy as np
 from scipy.stats import ttest_ind
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import matplotlib.pyplot as plt
+import os
 
 from fetchers.fetcher_csv import get_site_production, collect_data
 from db.helper_db import run_query, run_queries
 from misc.mapper import plot_map
+from misc.helper import time_batches
+
+CACHE_DIR = 'efficiency_cache'
 
 
 def random_closest():
-    solectria_sites = pd.read_csv('./csv/solectria_sites.csv', index_col='site_id')
-    solectria_sites = solectria_sites[solectria_sites['size'].notna()][
-        solectria_sites['csv_name'].notna()]  # removing solectria sites with no size
-    solectria_sites = solectria_sites[solectria_sites['latitude'] > 39]
+    solectria, solaredge = choose_subset()
 
-    solaredge_sites = pd.read_csv('./csv/solaredge_sites.csv', index_col='site_id')
-    solectria_sites = solectria_sites[solectria_sites['size'].notna()]  # removing Boott Mills
+    site = np.random.choice(solaredge.index, 1)[0]
 
-    # choosing a random solaredge site
-    site = np.random.choice(solaredge_sites.index, 1)[0]
-    site_coordinates = get_coordinates(*solaredge_sites.loc[site, ['address', 'city', 'state', 'zip']].values)
-
+    # df.insert(0, item[0], item[1])
     # finding closest solectria site
     min_dist = 1e100
     min_site_id = -1
-    for site_id, row in solectria_sites.iterrows():
-        dist = geopy.distance.vincenty(site_coordinates, (row['latitude'], row['longitude'])).km
-        if dist < min_dist:
-            min_dist = dist
-            min_site_id = site_id
+    # for se_id, se_lat, se_long in zip(solaredge['site_id'], solaredge['latitude'], solaredge['longitude']):
+    #     for se_id, se_lat, se_long in zip(solectria['site_id'], solectria['latitude'], solectria['longitude']):
+
+    # for site_id, row in solectria.iterrows():
+    # dist = geopy.distance.vincenty(site_coordinates, (row['latitude'], row['longitude'])).km
+    # if dist < min_dist:
+    #     min_dist = dist
+    #     min_site_id = site_id
 
     get_site_production(min_site_id, datetime(2019, 1, 1), datetime(2020, 1, 1)).to_csv('temp.csv')
+
+
+def choose_subset():
+    solaredge_sites = pd.read_csv('csv/solaredge_sites.csv')
+    solaredge_sites = solaredge_sites[solaredge_sites['state'] == 'MA']  # removing CA sites and Boott Mills
+
+    solectria_sites = pd.read_csv('csv/solectria_sites.csv')
+    solectria_sites = solectria_sites[solectria_sites['size'].notna()]
+    solectria_sites = solectria_sites[solectria_sites['fetch_id'].notna()]
+
+    solectria_sites = solectria_sites[np.logical_and(np.logical_and(
+        solectria_sites['latitude'] > min(solaredge_sites['latitude']) - 0.04,
+        solectria_sites['latitude'] < max(solaredge_sites['latitude']) + 0.04), np.logical_and(
+        solectria_sites['longitude'] > min(solaredge_sites['longitude']) - 0.04,
+        solectria_sites['longitude'] < max(solaredge_sites['longitude']) + 0.04)
+    )]
+
+    # solaredge_sites = pd.read_csv('csv/solaredge_sites.csv')
+    # solaredge_sites = solaredge_sites[solaredge_sites['site_id'].isin(solaredge_ids)]
+    # solectria_sites = pd.read_csv('csv/solectria_sites.csv')
+    # solectria_sites = solectria_sites[solectria_sites['site_id'].isin(solectria_ids)]
+    #
+    # plot_sites(solaredge_sites, solectria_sites)
+
+    return solaredge_sites, solectria_sites
 
 
 # production - dataframe with columns 'value' and 'date' for production in Wh and date in format '2020-01-20 10:00:00'
@@ -73,28 +98,76 @@ def daily_efficiency(production, size, interval):
 
 # conducts a two-tailed t-test comparing two
 # 'sites_1' and 'sites_2' - lists of site_ids; 'start', 'end' - datetime objects
-def compare(sites_1, sites_2, start, end):
-    site_ids = sites_1 + sites_2
-    datas = run_queries(["SELECT * FROM production WHERE site_id = '{}' AND date "
-                         "BETWEEN '{}'::timestamp and '{}'::timestamp"
-                        .format(site_id, str(start), str(end - relativedelta(minutes=1)))
+# interval in minutes
+def average_daily_efficiency(site_ids, start, end, interval):
+    site_metadatas = run_query(
+        'SELECT site_id, size FROM site WHERE site_id IN ' + '(' + ("'{}', " * len(site_ids))[:-2].format(
+            *site_ids) + ')', True).set_index('site_id')
+    # site_metadatas = run_queries(["SELECT * FROM site WHERE site_id = '{}'".format(site_id) for site_id in site_ids])
+    system_sizes = [float(site_metadatas['size'][str(id)]) for id in site_ids]
+    datas = run_queries(["SELECT * FROM production WHERE site_id = '{site_id}' AND date "
+                         ">= '{start}'::timestamp and date < '{end}'::timestamp"
+                        .format(site_id=site_id, start=str(start), end=str(end))
                          for site_id in site_ids], True)
-    site_metadatas = run_queries(["SELECT * FROM site WHERE site_id = '{}'".format(site_id) for site_id in site_ids])
-    system_sizes = [float(site_metadata[0]['size']) for site_metadata in site_metadatas]
-    efficiencies = [daily_efficiency(data, system_size, 15 * 60) for data, system_size in zip(datas, system_sizes)]
-    total_effs = [np.mean(eff['value']) for eff in
-                  efficiencies]  # taking a mean efficiency for each site over the whole period
-    eff_1 = total_effs[:len(sites_1)]
-    eff_2 = total_effs[len(sites_1):]
-    return ttest_ind(eff_1, eff_2)[1]
+    efficiencies = [daily_efficiency(data, size, interval * 60) for data, size in zip(datas, system_sizes)]
+
+    # for i in range(len(datas)):  # checking if any of the sites doesn't cover the entire period from start to end
+    #     if min(datas[i]['date']) != start or max(datas[i]['date']) != end - relativedelta(minutes=interval) or \
+    #             len(datas[i]) < (end - start) / timedelta(minutes=interval):
+    #         print(site_ids[i], min(datas[i]['date']), max(datas[i]['date']), len(datas[i]))
+
+    total_effs = [np.mean(eff['value']) for eff in efficiencies]  # mean efficiency for each site over the whole period
+
+    # if not os.path.exists(CACHE_DIR):
+    #     os.makedirs(CACHE_DIR)
+    # for i in range(len(efficiencies)):  # storing efficiencies as csv
+    #     efficiencies[i].to_csv(CACHE_DIR + '/' + "_".join([str(site_ids[i]), str(start), str(end)]).replace(':', '=') +
+    #                            '.csv', index_label='date')
+    return total_effs
 
 
-if __name__ == '__main__':
-    # print(compare([605934, 605990, 606333, 613895, 615959, 635389], [659086, 691203, 695265, 703541, 704131, 748679],
-    #               datetime(2018, 1, 1), datetime(2019, 1, 1)))
-    solaredge_sites = pd.read_csv('csv/solaredge_sites.csv')
-    solectria_sites = pd.read_csv('csv/solectria_sites.csv')
+def plot_sites(solaredge_sites=None, solectria_sites=None):
+    if solaredge_sites is None:
+        solaredge_sites = pd.read_csv('csv/solaredge_sites.csv')
+    if solectria_sites is None:
+        solectria_sites = pd.read_csv('csv/solectria_sites.csv')
+
     solaredge_sites.insert(0, 'source', 'solaredge')
     solectria_sites.insert(0, 'source', 'solectria')
     df = pd.concat([solaredge_sites, solectria_sites], ignore_index=True)
     plot_map(df)
+
+
+def solectria_to_database(solectria_ids):
+    fetching_times = [] * len(solectria_ids)
+    for site_id in solectria_ids:
+        print('_____________________\nFetching site:', site_id)
+        t = time.time()
+        try:
+            if not collect_data(site_id, datetime(2018, 1, 1), datetime(2020, 1, 1), 60):
+                print("Fetching failed")
+        except Exception as e:
+            print('Error while fetching:', str(e))
+        t = time.time() - t
+        print("Total time:", t)
+        fetching_times.append(t)
+    return fetching_times
+
+
+if __name__ == '__main__':
+    solaredge_ids = ['613895', '635389', '593260', '605934', '455492', '452807', '453519', '468575', '453884', '516078',
+                     '225542', '491336', '605990', '521291', '452828', '571900', '570177', '469767', '548640', '606333',
+                     '439323', '515254', '659086', '565251', '691203', '695265', '703541', '704131', '420924', '748679',
+                     '988889', '956683', '829735', '615959', '345593']
+    solectria_ids = [1759, 3970, 1097, 3506, 3929, 4686, 4635, 4221, 4267, 3452, 4031, 4806, 1630, 918, 682,
+                     3750, 715, 3590, 448, 4034, 3117, 694, 2015, 4065, 3113, 3855, 3988, 4656, 3125, 2550, 4661,
+                     3778, 4721, 3577, 4381, 2026, 4160, 1700, 1703, 2002, 1701, 3009, 2014, 3347, 3980, 2494,
+                     1702, 4234, 644, 4296, 3859, 3862, 3682, 3680, 2030, 3793, 2613, 1751, 3116, 1752, 2197,
+                     3858, 2485, 1049, 1982, 2768, 4334, 3585, 3274, 948, 2037, 1603, 3771, 4731, 3421, 530, 1563, 3654,
+                     3551, 3552, 3227, 4572, 843, 1745, 1740, 1444, 1850, 2177, 3660, 2437, 3558, 3095, 1881,
+                     1892, 871, 716, 895]
+    solaredge_effs = average_daily_efficiency(solaredge_ids, datetime(2019, 1, 1), datetime(2020, 1, 1), 15)
+    print("Solaredge efficiencies:", solaredge_effs)
+    solectria_effs = average_daily_efficiency(solectria_ids, datetime(2019, 1, 1), datetime(2020, 1, 1), 60)
+    print("Solectria efficiencies:", solectria_effs)
+    print("P-value:", ttest_ind(solaredge_effs, solectria_effs)[1])
