@@ -195,10 +195,10 @@ def parse(raw):
         main_df = rows[2]
         main_df.columns = list(rows[0].iloc[0])  # setting column names [AC Energy, AC Power, ...]
         main_df.index = list(map(lambda x: x[1:-1], rows[2].index))  # '[2020-02-23 00:00:00]' -> '2020-02-23 00:00:00'
-        # main_df.fillna(0, inplace=True)
+        main_df.fillna(0, inplace=True)
         if 'inv' in rows[0].columns[0]:
-            main_df["AC Power"] = main_df["AC Power"].astype(float)
-            main_df["AC Energy"] = main_df["AC Power"].astype(float)
+            main_df["AC Power"] = main_df["AC Power"].astype(int)
+            main_df["AC Energy"] = main_df["AC Energy"].astype(float)
             try:
                 main_df["AC Current"] = main_df["AC Current"].astype(float)
             except KeyError:  # "AC Current" not in df
@@ -217,8 +217,9 @@ def parse(raw):
 # e.g.: {'site_id': 4760} to will add a column 'site_id' and puts 4760 in all rows
 # rename - specified which columns should be renamed before putting into a database
 # e.g.: {"AC Power": "value"} - replaces dataframe's column 'AC Power' with databases's 'value'
-def store(table, df, defaults={}, rename={}, drop=[], index_label=None):
+def store(table, df, defaults={}, rename={}, drop=[], index_label=None, bulk_load=False):
     conn = None
+    raw_conn = None
     try:
         engine = sqlalchemy.create_engine(
             "postgresql://{user}:{password}@{host}:5432/{database}".format(**get_db_params()))
@@ -230,10 +231,26 @@ def store(table, df, defaults={}, rename={}, drop=[], index_label=None):
             df.drop(drop, axis=1, inplace=True)
         for item in defaults.items():
             df.insert(0, item[0], item[1])
-        df.to_sql(table, conn, if_exists='append', index=False if index_label is None else True,
-                  index_label=index_label)
+        if bulk_load:
+            output = StringIO()
+            df.to_csv(output, sep='\t', header=False)
+            output.getvalue()
+            output.seek(0)  # jump to start of stream
+            raw_conn = engine.raw_connection()
+            cursor = raw_conn.cursor()
+            columns = [index_label] + list(df.columns) if index_label else df.columns
+            cursor.copy_from(output, table, null="", columns=columns)
+            raw_conn.commit()
+            cursor.close()
+            raw_conn.close()
+        else:
+            df.to_sql(table, conn, if_exists='append', index=False if index_label is None else True,
+                      index_label=index_label)
     finally:
-        conn = None
+        if conn is not None:
+            conn.close()
+        if raw_conn is not None:
+            raw_conn.close()
 
 
 # returns dataframes of inverter production production
@@ -260,7 +277,6 @@ def get_historical_data(site_id, start, end, time_unit='week'):
                    get_units_ago[time_unit](end - timedelta(minutes=1), current) - 1, -1):
         data = get_inv_production(site_id, "0,{},{},1".format(unit_view[time_unit], i))
 
-        # TODO: weather
         if False not in [data[j][data[j].columns[0]].isnull().all() for j in range(len(data))]:  # if all values are nan
             continue
 
@@ -275,6 +291,8 @@ def get_historical_data(site_id, start, end, time_unit='week'):
 
     for i in range(len(total)):  # removing rows outside of [start, end), e.g.: [mon, tue, |start, ... |, end, sat, sun]
         total[i] = total[i][np.logical_and(str(start) <= total[i].index, total[i].index < str(end))]
+        if 'AC Power' in total[i]:
+            total[i] = power_to_production(total[i], 'AC Power')
     return total
 
 
@@ -284,17 +302,14 @@ def power_to_production(power, column):
     interval = sum((np.array(list(map(int, power.index[1].split(' ')[1].split(':'))))
                     - np.array(list(map(int, power.index[0].split(' ')[1].split(':')))))
                    * np.array([3600, 60, 1]))
-    power[column] = power[column].mul(interval / 3600)
+    power[column] = power[column].mul(int(round(interval / 3600)))
     return power
 
 
-# Inverter merge optimized for only summing inverter's AC Power and converting it to Wh
+# Inverter merge for 'AC Power' column already converted to Wh
 def merge_inv_production(inv_dfs):
     total = None
     for df in inv_dfs:
-        df = power_to_production(df, 'AC Power')
-        df.fillna(0, inplace=True)  # because nan + anything == nan
-
         if total is None:
             total = df
             continue
@@ -317,26 +332,37 @@ def collect_data(site_id, start, end, interval=10):
     if 'Weather' in inv_data[-1].columns.name:
         store('weather', inv_data[-1], {'site_id': site_id},
               {"Ambient": "temperature_ambient", "Module": "temperature_module", "Irradiance": "irradiance",
-               "Wind Direction": "wind_direction", 'Wind Speed': 'wind_speed'}, index_label='date')
+               "Wind Direction": "wind_direction", 'Wind Speed': 'wind_speed'}, index_label='date', bulk_load=True)
         inv_data = inv_data[:-1]  # removing weather from inverters
+
+    total = None
     for i in range(len(inv_data)):
         order, manuf_id, model = split_inv_name(inv_data[i].columns.name)
-        store("component_production", power_to_production(inv_data[i], 'AC Power'),
-              {'component_id': manuf_id, 'unit': 'Wh'}, {"AC Power": "value"},
-              [c for c in inv_data[i].columns if c != 'AC Power'], index_label='date')  # removing all other columns
 
         # check if component already in component_details; throws exception if error with the query
         if len(run_query(
                 "SELECT * from component_details WHERE manufacturers_component_id LIKE '{}'".format(manuf_id))) == 0:
-            # TODO: check if inverter/site works
             store('component_details', pd.DataFrame(
                 {'component_id': order - 1, 'manufacturers_component_id': manuf_id, 'type': 'inverter',
                  'sub_type': model, 'site_id': site_id, 'data_provider': 'Solectria', 'manufacturer': 'Solectria',
                  'is_energy_producing': True}, [0]), index_label=None)
 
+        inv_data[i].insert(0, 'component_id', manuf_id)
+        if i == 0:
+            total = inv_data[i]
+            continue
+        total = pd.concat([total, inv_data[i]])
+
+    # TODO: check if inverter data is not empty
+    store("component_production", total, {'unit': 'Wh'}, {"AC Power": "value"},
+          [c for c in total.columns if c not in ['AC Power', 'component_id']],  # removing all other columns
+          index_label='date', bulk_load=True)
+
     total_data = merge_inv_production(inv_data)
     store("production", total_data, {'site_id': site_id, 'unit': 'Wh', 'measured_by': 'INVERTER'},
-          {"AC Power": "value"}, [c for c in total_data.columns if c != 'AC Power'], index_label='date')
+          {"AC Power": "value"}, [c for c in total_data.columns if c not in ['AC Power']],
+          index_label='date', bulk_load=True)
+
     if len(run_query("SELECT * from site WHERE site_id LIKE '{}'".format(site_id))) == 0:
         site_data = sites_data.loc[site_id].to_dict()
         site_data['status'] = 'Active'
