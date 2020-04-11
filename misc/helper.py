@@ -4,7 +4,7 @@ import numpy as np
 from dateutil.relativedelta import relativedelta
 import os
 
-PLOTS_DIR = './dataviz'
+PLOTS_DIR = 'dataviz'
 
 if not os.path.exists(PLOTS_DIR):
     os.makedirs(PLOTS_DIR)
@@ -18,6 +18,19 @@ def best_fit_curve(x, y, deg, n):
     x2 = np.linspace(min(x), max(x), len(x) * n)
     y2 = np.polyval(coeffs, x2)
     return x2, y2, coeffs
+
+
+#  smoothens the data by making each point the mean of all points within 'r' points around it
+def normalize(y, r=30):
+    new_y = list()
+    for i in range(len(y)):
+        if i < r:
+            new_y.append(np.mean(y[0:i + r]))
+        elif i >= len(y) - r:
+            new_y.append(np.mean(y[i - r:len(y)]))
+        else:
+            new_y.append(np.mean(y[i - r:i + r]))
+    return new_y
 
 
 def get_color(i, n):
