@@ -4,9 +4,11 @@ import pandas as pd
 from site_fetching.get_coordinate import get_coordinates
 import geopy.distance
 import numpy as np
+from colour import Color
 from scipy.stats import ttest_ind
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import os
 
@@ -16,6 +18,7 @@ from misc.mapper import plot_map
 from misc.helper import time_batches, normalize
 
 CACHE_DIR = 'efficiency_cache'
+DATAVIZ_DIR = 'dataviz'
 
 
 # chooses a subset of solectria sites based on farthest solaredge sites
@@ -37,7 +40,7 @@ def choose_subset(radius):
     return list(map(int, solectria_sites['site_id'].values))
 
 
-def plot_sites(solaredge_sites=None, solectria_sites=None):
+def map_sites(solaredge_sites=None, solectria_sites=None):
     if solaredge_sites is None:
         solaredge_sites = pd.read_csv('csv/solaredge_sites.csv')
     if solectria_sites is None:
@@ -49,14 +52,45 @@ def plot_sites(solaredge_sites=None, solectria_sites=None):
     plot_map(df)
 
 
-def plot_annual_performance(solaredge_effs, solectria_effs):
-    plt.plot_date(pd.to_datetime(solaredge_effs.columns), normalize(np.mean(solaredge_effs), 30),
+def plot_annual_performance(solaredge_effs, solectria_effs, std=False, r=15, filename=None):
+    solaredge_effs = solaredge_effs.replace(0, np.nan)
+    solectria_effs = solectria_effs.replace(0, np.nan)
+
+    se_x = pd.to_datetime(solaredge_effs.columns)
+    se_mean = normalize(solaredge_effs.mean(), r)
+    se_std = normalize(solaredge_effs.std(), r)
+    plt.plot_date(se_x, se_mean,
                   linestyle='solid', marker=None, label='Solaredge', color='orange')
-    plt.plot_date(pd.to_datetime(solectria_effs.columns), normalize(np.mean(solectria_effs), 30),
-                  linestyle='solid', marker=None, label='Solectria', color='purple')
+
+    if std:
+        plt.fill_between(se_x, se_mean - se_std, se_mean + se_std, alpha=0.1, color='orange')
+
+    sol_x = pd.to_datetime(solectria_effs.columns)
+    sol_mean = normalize(solectria_effs.mean(), r)
+    ssol_std = normalize(solectria_effs.std(), r)
+    plt.plot_date(sol_x, sol_mean,
+                  linestyle='solid', marker=None, label='Solectria', color='green')
+    if std:
+        plt.fill_between(sol_x, sol_mean - ssol_std, sol_mean + ssol_std, alpha=0.1, color='green')
     plt.xlabel('Date')
     plt.ylabel('Performance')
+    plt.legend()
+    if filename:
+        plt.savefig(DATAVIZ_DIR + '/' + filename + ".pmg", dpi=400)
     plt.show()
+
+
+def plot_each_site(effs, filename=None):
+    eff_colors = ["rgba({},{},{},{})".format(*[round(val * 255) for val in c.get_rgb()], 0.4) for c in
+                  Color('purple').range_to(Color('red'), round(max(effs.transpose().mean() * 100)) + 1)]
+    x = pd.to_datetime(effs.columns)
+    fig = go.Figure(
+        data=[go.Scatter(x=x, y=normalize(effs.loc[ind]), name=ind,
+                         line=dict(width=1.5, color=eff_colors[int(round(effs.loc[ind].mean() * 100))])) for ind in
+              effs.index])
+    fig.show()
+    if filename:
+        fig.write_html(DATAVIZ_DIR + '/' + filename + ".html")
 
 
 def solectria_to_database(solectria_ids):
@@ -150,7 +184,7 @@ def average_daily_efficiency(site_ids, start, end, interval):
     existing_files = [CACHE_DIR + '/' + f for f in os.listdir(CACHE_DIR)]
     expected_files = [get_filename(site_id, start, end) for site_id in site_ids]
 
-    efficiencies = [[]] * len(site_ids)
+    efficiencies = [None] * len(site_ids)
     new_sites = {}
 
     for i in range(len(site_ids)):
@@ -201,14 +235,23 @@ def average_daily_efficiency(site_ids, start, end, interval):
 
 
 if __name__ == '__main__':
-    solaredge_ids = list(zip(*run_query(
-        "SELECT site_id FROM site WHERE length(site_id) > 4 AND state = 'MA'", True).values))[0]
-    solectria_ids = list(set(choose_subset(0.2125)).intersection(set(map(int, list(zip(*run_query(
-        "SELECT site_id FROM site WHERE length(site_id) <= 4", True).values))[0]))))
+    solaredge_ids = sorted(list(zip(*run_query(
+        "SELECT site_id FROM site WHERE length(site_id) > 4 AND state = 'MA'", True).values))[0])
+    solectria_ids = sorted(list(set(choose_subset(0.2125)).intersection(set(map(int, list(zip(*run_query(
+        "SELECT site_id FROM site WHERE length(site_id) <= 4", True).values))[0])))))
 
     start = datetime(2018, 1, 1)
     end = datetime(2020, 1, 1)
     solectria_effs = average_daily_efficiency(solectria_ids, start, end, 60)
     solaredge_effs = average_daily_efficiency(solaredge_ids, start, end, 15)
 
-    plot_annual_performance(solectria_effs, solaredge_effs)
+    avg_eff = solectria_effs.transpose().mean()
+    solectria_effs = solectria_effs[
+        solectria_effs.index.isin(avg_eff[np.logical_and(avg_eff > 0.05, avg_eff < 0.5)].index)]
+    avg_eff = solaredge_effs.transpose().mean()
+    solaredge_effs = solaredge_effs[
+        solaredge_effs.index.isin(avg_eff[np.logical_and(avg_eff > 0.05, avg_eff < 0.5)].index)]
+
+    plot_annual_performance(solaredge_effs, solectria_effs)
+    plot_each_site(solaredge_effs)
+    plot_each_site(solectria_effs)

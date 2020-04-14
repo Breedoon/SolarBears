@@ -21,15 +21,16 @@ def best_fit_curve(x, y, deg, n):
 
 
 #  smoothens the data by making each point the mean of all points within 'r' points around it
-def normalize(y, r=30):
-    new_y = list()
+def normalize(y, r=15):
+    y = np.array(y)
+    new_y = np.zeros(len(y))
     for i in range(len(y)):
         if i < r:
-            new_y.append(np.mean(y[0:i + r]))
+            new_y[i] =np.mean(y[0:i + r])
         elif i >= len(y) - r:
-            new_y.append(np.mean(y[i - r:len(y)]))
+            new_y[i] = np.mean(y[i - r:len(y)])
         else:
-            new_y.append(np.mean(y[i - r:i + r]))
+            new_y[i] = np.mean(y[i - r:i + r])
     return new_y
 
 
