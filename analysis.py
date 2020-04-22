@@ -3,9 +3,11 @@ import time
 import pandas as pd
 from site_fetching.get_coordinate import get_coordinates
 import geopy.distance
+from statsmodels.graphics.tsaplots import plot_acf
 import numpy as np
 from colour import Color
-from scipy.stats import ttest_ind
+from scipy.stats import ttest_ind, wilcoxon, ttest_1samp
+from scipy import stats
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
@@ -19,6 +21,10 @@ from misc.helper import time_batches, normalize
 
 CACHE_DIR = 'efficiency_cache'
 DATAVIZ_DIR = 'dataviz'
+
+
+def se(a, b):
+    return (a.std() ** 2 / a.count() + b.std() ** 2 / b.count()) ** 0.5
 
 
 # chooses a subset of solectria sites based on farthest solaredge sites
@@ -53,9 +59,6 @@ def map_sites(solaredge_sites=None, solectria_sites=None):
 
 
 def plot_annual_performance(solaredge_effs, solectria_effs, std=False, r=15, filename=None):
-    solaredge_effs = solaredge_effs.replace(0, np.nan)
-    solectria_effs = solectria_effs.replace(0, np.nan)
-
     se_x = pd.to_datetime(solaredge_effs.columns)
     se_mean = normalize(solaredge_effs.mean(), r)
     se_std = normalize(solaredge_effs.std(), r)
@@ -93,13 +96,47 @@ def plot_each_site(effs, filename=None):
         fig.write_html(DATAVIZ_DIR + '/' + filename + ".html")
 
 
-def solectria_to_database(solectria_ids):
+def plot_differences(solaredge_effs, solectria_effs):
+    left, width = 0.1, 0.65
+    bottom, height = 0.2, 0.70
+    spacing = 0.005
+    diffs = (solaredge_effs.mean() - solectria_effs.mean()) / se(solaredge_effs, solectria_effs)
+    plt.figure(figsize=(6, 4))
+    ax = plt.axes([left, bottom, width, height])
+    ax.plot_date(pd.to_datetime(solectria_effs.columns), diffs, c='pink',
+                 alpha=0.5, label='Daily differences')
+    ax.plot_date(pd.to_datetime(solectria_effs.columns), normalize(diffs),
+                 c='magenta', ls='-', marker=None, lw=3, label='Moving mean (n=30)')
+    ax.axhline(0, ls='--', c='k', alpha=0.5)
+    ax.axhline(np.mean(diffs), ls='--', c='purple', alpha=0.5,
+               label='Mean difference')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Standard Deviations')
+    ax.grid(alpha=0.3)
+    ax.legend(loc='upper center', bbox_to_anchor=(0.61, -0.14),
+              fancybox=True, ncol=3)
+    plt.title('Difference in performance between Solaredge and Solectria')
+    ax_histy = plt.axes([left + width + spacing, bottom, 0.2, height])
+    ax_histy.tick_params(direction='in', labelleft=False)
+    ax_histy.hist(diffs, orientation='horizontal', color='pink', bins=15, density=True)
+    ax_histy.axhline(0, ls='--', c='k', alpha=0.5)
+    ax_histy.axhline(np.mean(diffs), ls='--', c='purple', alpha=0.5,
+                     label='Mean difference', )
+    ax_histy.axis('off')
+    x = np.linspace(min(diffs), max(diffs), len(diffs))
+    yy = stats.gaussian_kde(diffs)(x)  # getting KDE from a library function
+    ax_histy.plot(yy, x, color='magenta', lw=3)
+
+    plt.show()
+
+
+def solectria_to_database(solectria_ids, start, end):
     fetching_times = [] * len(solectria_ids)
     for site_id in solectria_ids:
         print('_____________________\nFetching site:', site_id)
         t = time.time()
         try:
-            if not collect_data(site_id, datetime(2018, 1, 1), datetime(2020, 1, 1), 60):
+            if not collect_data(site_id, start, end, 60):
                 print("Fetching failed")
         except Exception as e:
             print('Error while fetching:', str(e))
@@ -228,7 +265,11 @@ def average_daily_efficiency(site_ids, start, end, interval):
 
     total_effs = efficiencies[0].rename(columns={"value": site_ids[0]}).transpose()
     for i in range(1, len(efficiencies)):
-        total_effs = total_effs.append(efficiencies[i].rename(columns={"value": site_ids[i]}).transpose(), sort=True)
+        try:
+            total_effs = total_effs.append(efficiencies[i].rename(columns={"value": site_ids[i]}).transpose(),
+                                           sort=True)
+        except AttributeError:
+            print("No data for site", site_ids[i])
     total_effs.fillna(0, inplace=True)
 
     return total_effs
@@ -240,8 +281,9 @@ if __name__ == '__main__':
     solectria_ids = sorted(list(set(choose_subset(0.2125)).intersection(set(map(int, list(zip(*run_query(
         "SELECT site_id FROM site WHERE length(site_id) <= 4", True).values))[0])))))
 
-    start = datetime(2018, 1, 1)
-    end = datetime(2020, 1, 1)
+    start = datetime(2019, 3, 1)
+    end = datetime(2020, 3, 1)
+
     solectria_effs = average_daily_efficiency(solectria_ids, start, end, 60)
     solaredge_effs = average_daily_efficiency(solaredge_ids, start, end, 15)
 
@@ -252,6 +294,14 @@ if __name__ == '__main__':
     solaredge_effs = solaredge_effs[
         solaredge_effs.index.isin(avg_eff[np.logical_and(avg_eff > 0.05, avg_eff < 0.5)].index)]
 
+    solaredge_effs = solaredge_effs.replace(0, np.nan)
+    solectria_effs = solectria_effs.replace(0, np.nan)
+
+    diffs = (solaredge_effs.mean() - solectria_effs.mean()) / se(solaredge_effs, solectria_effs)
+    diffs.index = pd.to_datetime(diffs.index)
+    print(ttest_1samp(diffs, 0, nan_policy='omit'))
+
+    plot_differences(solaredge_effs, solectria_effs)
     plot_annual_performance(solaredge_effs, solectria_effs)
     plot_each_site(solaredge_effs)
     plot_each_site(solectria_effs)
