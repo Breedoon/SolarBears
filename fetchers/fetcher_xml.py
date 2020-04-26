@@ -5,7 +5,7 @@ from misc.helper import plot_days, time_batches
 import requests
 import pandas as pd
 
-DIR = './solectria_raw_xml'
+DIR = 'solectria_raw_xml'
 URL = "http://solrenview.com/xmlfeed/ss-xmlN.php"
 wait_time = 0  # seconds
 last_fetch = 0
@@ -19,14 +19,14 @@ def get_params(site_id, start, end):
         return {'site_id': str(site_id)}
 
 
-def get_file_name(params):
+def get_filename(params):
     return DIR + "/" + "_".join(params.values()).replace(':', '=') + '.xml'
 
 
 # start & end - datetime objects
 def fetch(site_id, start, end):
     params = get_params(site_id, start, end)
-    filename = get_file_name(params)
+    filename = get_filename(params)
     print("Fetching: " + filename)
     if not os.path.exists(DIR):
         os.makedirs(DIR)
@@ -113,7 +113,7 @@ def fetch_active_sites(sites):
             except requests.exceptions.ConnectionError:
                 print('Interrupted')
                 try:
-                    os.remove(get_file_name(get_params(site, *get_stored_datetimes())))
+                    os.remove(get_filename(get_params(site, *get_stored_datetimes())))
                 except:
                     pass
                 time.sleep(6.0)

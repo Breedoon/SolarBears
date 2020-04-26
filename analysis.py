@@ -17,7 +17,8 @@ import os
 from fetchers.fetcher_csv import get_site_production, collect_data
 from db.helper_db import run_query, run_queries
 from misc.mapper import plot_map
-from misc.helper import time_batches, normalize
+from misc.helper import time_batches, normalize, best_fit_curve
+import misc.helper
 
 CACHE_DIR = 'efficiency_cache'
 DATAVIZ_DIR = 'dataviz'
@@ -52,13 +53,49 @@ def map_sites(solaredge_sites=None, solectria_sites=None):
     if solectria_sites is None:
         solectria_sites = pd.read_csv('csv/solectria_sites.csv')
 
+    solaredge_sites = solaredge_sites[solaredge_sites['site_id'].isin(solaredge_effs.index)]
+    solectria_sites = solectria_sites[solectria_sites['site_id'].isin(solectria_effs.index)]
+
+    # jittering
+    solaredge_sites['latitude'] = solaredge_sites['latitude'] + np.random.rand(len(solaredge_sites)) * 0.01
+    solaredge_sites['longitude'] = solaredge_sites['longitude'] + np.random.rand(len(solaredge_sites)) * 0.01
+    solectria_sites['latitude'] = solectria_sites['latitude'] + np.random.rand(len(solectria_sites)) * 0.01
+    solectria_sites['longitude'] = solectria_sites['longitude'] + np.random.rand(len(solectria_sites)) * 0.01
     solaredge_sites.insert(0, 'source', 'solaredge')
     solectria_sites.insert(0, 'source', 'solectria')
     df = pd.concat([solaredge_sites, solectria_sites], ignore_index=True)
     plot_map(df)
 
 
-def plot_annual_performance(solaredge_effs, solectria_effs, std=False, r=15, filename=None):
+def plot_hists(se_avg_eff, sol_avg_eff):
+    fig, (ax2, ax1) = plt.subplots(2)
+    ax1.hist(sol_avg_eff, bins=20, color='green', density=True, label='Histogram (20 bins)')
+    x = np.linspace(min(sol_avg_eff), max(sol_avg_eff), len(sol_avg_eff))
+    yy = stats.gaussian_kde(sol_avg_eff.dropna())(x)
+    ax1.plot(x, yy, color='yellowgreen', lw=3, label='Kernel Density Estimation')
+    ax1.set_xlabel('Annual efficiency')
+    ax1.set_ylabel('Density of sites')
+    ax1.set_xlim([0, 1])
+    ax1.axvline(0.05, color='forestgreen', ls='--', label='Cutoffs')
+    ax1.axvline(0.3, color='forestgreen', ls='--')
+    ax1.legend()
+    ax1.set_title('Solectria')
+    ax2.hist(se_avg_eff, bins=15, color='orange', density=True, label='Histogram (10 bins)')
+    x = np.linspace(min(se_avg_eff), max(se_avg_eff), len(se_avg_eff))
+    yy = stats.gaussian_kde(se_avg_eff.dropna())(x)
+    ax2.plot(x, yy, color='coral', lw=3, label='Kernel Density Estimation')
+    ax2.set_ylabel('Density of sites')
+    ax2.axvline(0.05, color='chocolate', ls='--', label='Cutoffs')
+    ax2.axvline(0.3, color='chocolate', ls='--')
+    ax2.set_xlim([0, 1])
+    ax2.legend()
+    ax2.set_title('Solaredge')
+    fig.tight_layout(pad=1.0)
+    fig.savefig(DATAVIZ_DIR + '/' 'hists.png', dpi=400)
+    plt.show()
+
+
+def plot_annual_performance(solaredge_effs, solectria_effs, std=False, r=15):
     se_x = pd.to_datetime(solaredge_effs.columns)
     se_mean = normalize(solaredge_effs.mean(), r)
     se_std = normalize(solaredge_effs.std(), r)
@@ -77,9 +114,9 @@ def plot_annual_performance(solaredge_effs, solectria_effs, std=False, r=15, fil
         plt.fill_between(sol_x, sol_mean - ssol_std, sol_mean + ssol_std, alpha=0.1, color='green')
     plt.xlabel('Date')
     plt.ylabel('Performance')
+    plt.title('Solaredge vs Solectria')
     plt.legend()
-    if filename:
-        plt.savefig(DATAVIZ_DIR + '/' + filename + ".pmg", dpi=400)
+    plt.savefig(DATAVIZ_DIR + '/' + "solaredge_vs_solectria.png", dpi=400)
     plt.show()
 
 
@@ -96,12 +133,22 @@ def plot_each_site(effs, filename=None):
         fig.write_html(DATAVIZ_DIR + '/' + filename + ".html")
 
 
+def plot_annual_plotly(solaredge_effs, solectria_effs, filename='solaredge_vs_solectria'):
+    fig = go.Figure(data=[go.Scatter(x=pd.to_datetime(solaredge_effs.columns), y=normalize(solaredge_effs.mean()),
+                                     name='Solaredge', line=dict(width=1.5, color='orange')),
+                          go.Scatter(x=pd.to_datetime(solectria_effs.columns), y=normalize(solectria_effs.mean()),
+                                     name='Solectria', line=dict(width=1.5, color='green'))])
+    fig.show()
+    if filename:
+        fig.write_html(DATAVIZ_DIR + '/' + filename + ".html")
+
+
 def plot_differences(solaredge_effs, solectria_effs):
-    left, width = 0.1, 0.65
+    left, width = 0.13, 0.63
     bottom, height = 0.2, 0.70
     spacing = 0.005
-    diffs = (solaredge_effs.mean() - solectria_effs.mean()) / se(solaredge_effs, solectria_effs)
-    plt.figure(figsize=(6, 4))
+    diffs = ((solaredge_effs.mean() - solectria_effs.mean()) / se(solaredge_effs, solectria_effs))
+    plt.figure(figsize=(7, 4))
     ax = plt.axes([left, bottom, width, height])
     ax.plot_date(pd.to_datetime(solectria_effs.columns), diffs, c='pink',
                  alpha=0.5, label='Daily differences')
@@ -109,11 +156,15 @@ def plot_differences(solaredge_effs, solectria_effs):
                  c='magenta', ls='-', marker=None, lw=3, label='Moving mean (n=30)')
     ax.axhline(0, ls='--', c='k', alpha=0.5)
     ax.axhline(np.mean(diffs), ls='--', c='purple', alpha=0.5,
-               label='Mean difference')
+               label='Overall mean')
     ax.set_xlabel('Date')
-    ax.set_ylabel('Standard Deviations')
+    ax.set_ylabel('Standard deviations')
+    ax.annotate('Solaredge is better', xy=(diffs.index[len(diffs) // 2], max(diffs)), size=25, color='grey', alpha=0.4,
+                ha='center', va='top')
+    ax.annotate('Solectria is better', xy=(diffs.index[len(diffs) // 2], min(diffs)), size=25, color='grey', alpha=0.4,
+                ha='center')
     ax.grid(alpha=0.3)
-    ax.legend(loc='upper center', bbox_to_anchor=(0.61, -0.14),
+    ax.legend(loc='lower center', bbox_to_anchor=(0.5, -0.28),
               fancybox=True, ncol=3)
     plt.title('Difference in performance between Solaredge and Solectria')
     ax_histy = plt.axes([left + width + spacing, bottom, 0.2, height])
@@ -121,12 +172,12 @@ def plot_differences(solaredge_effs, solectria_effs):
     ax_histy.hist(diffs, orientation='horizontal', color='pink', bins=15, density=True)
     ax_histy.axhline(0, ls='--', c='k', alpha=0.5)
     ax_histy.axhline(np.mean(diffs), ls='--', c='purple', alpha=0.5,
-                     label='Mean difference', )
+                     label='Overall mean', )
     ax_histy.axis('off')
     x = np.linspace(min(diffs), max(diffs), len(diffs))
-    yy = stats.gaussian_kde(diffs)(x)  # getting KDE from a library function
+    yy = stats.gaussian_kde(diffs.dropna())(x)
     ax_histy.plot(yy, x, color='magenta', lw=3)
-
+    plt.savefig(DATAVIZ_DIR + '/' + 'diffs.png', dpi=400)
     plt.show()
 
 
@@ -278,7 +329,14 @@ def average_daily_efficiency(site_ids, start, end, interval):
 if __name__ == '__main__':
     solaredge_ids = sorted(list(zip(*run_query(
         "SELECT site_id FROM site WHERE length(site_id) > 4 AND state = 'MA'", True).values))[0])
-    solectria_ids = sorted(list(set(choose_subset(0.2125)).intersection(set(map(int, list(zip(*run_query(
+    # solectria_ids = sorted(list(set(choose_subset(0.2125)).intersection(set(map(int, list(zip(*run_query(
+    solectria_ids = sorted(list(
+        {1759, 3970, 1097, 3506, 3929, 4686, 4635, 4221, 4267, 3452, 4031, 4806, 1630, 918, 682, 3750, 715, 3590, 448,
+         4034, 3117, 694, 2015, 4065, 3113, 3855, 3988, 4656, 3125, 2550, 4661, 3778, 4721, 3577, 4381, 2026, 4160,
+         1700, 1703, 2002, 1701, 3009, 2014, 3347, 3980, 2494, 1702, 4234, 644, 4296, 3859, 3862, 3682, 3680, 2030,
+         3793, 2613, 1751, 3116, 1752, 2197, 3858, 2485, 1049, 1982, 2768, 4334, 3585, 3274, 948, 2037, 1603, 3771,
+         4731, 3421, 530, 1563, 3654, 3551, 3552, 3227, 4572, 843, 1745, 1740, 1444, 1850, 2177, 3660, 2437, 3558, 3095,
+         1881, 1892, 871, 716, 895}.intersection(set(map(int, list(zip(*run_query(
         "SELECT site_id FROM site WHERE length(site_id) <= 4", True).values))[0])))))
 
     start = datetime(2019, 3, 1)
@@ -287,21 +345,35 @@ if __name__ == '__main__':
     solectria_effs = average_daily_efficiency(solectria_ids, start, end, 60)
     solaredge_effs = average_daily_efficiency(solaredge_ids, start, end, 15)
 
-    avg_eff = solectria_effs.transpose().mean()
+    sol_avg_eff = solectria_effs.transpose().mean()
     solectria_effs = solectria_effs[
-        solectria_effs.index.isin(avg_eff[np.logical_and(avg_eff > 0.05, avg_eff < 0.5)].index)]
-    avg_eff = solaredge_effs.transpose().mean()
+        solectria_effs.index.isin(sol_avg_eff[np.logical_and(sol_avg_eff > 0.05, sol_avg_eff < 0.3)].index)]
+    se_avg_eff = solaredge_effs.transpose().mean()
     solaredge_effs = solaredge_effs[
-        solaredge_effs.index.isin(avg_eff[np.logical_and(avg_eff > 0.05, avg_eff < 0.5)].index)]
+        solaredge_effs.index.isin(se_avg_eff[np.logical_and(se_avg_eff > 0.05, se_avg_eff < 0.3)].index)]
 
     solaredge_effs = solaredge_effs.replace(0, np.nan)
     solectria_effs = solectria_effs.replace(0, np.nan)
 
     diffs = (solaredge_effs.mean() - solectria_effs.mean()) / se(solaredge_effs, solectria_effs)
     diffs.index = pd.to_datetime(diffs.index)
-    print(ttest_1samp(diffs, 0, nan_policy='omit'))
+    ttest_1samp(diffs, 0, nan_policy='omit')
+
+    ttest_ind(solaredge_effs.transpose().mean(), solectria_effs.transpose().mean(), nan_policy='omit')
+
+    solectria_size_effs = pd.concat([run_query(
+        'SELECT site_id, size FROM site '
+        'WHERE site_id IN ' + '(' + ("'{}', " * len(solectria_effs.index))[:-2].format(*solectria_effs.index) + ')',
+        True).set_index('site_id'), solectria_effs.transpose().mean()], ignore_index=False, axis=1)
+
+    plot_acf(diffs, lags=len(solectria_effs.columns) - 1, color='magenta', title='', zero=False)
+    plt.ylabel('Average correlation coefficient (r)')
+    plt.xlabel('Lag time (days)')
+    plt.savefig(DATAVIZ_DIR + "/" + 'autocorr.png', dpi=400)
+    plt.show()
 
     plot_differences(solaredge_effs, solectria_effs)
     plot_annual_performance(solaredge_effs, solectria_effs)
+    plot_annual_plotly(solaredge_effs, solectria_effs)
     plot_each_site(solaredge_effs)
     plot_each_site(solectria_effs)

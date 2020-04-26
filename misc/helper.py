@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from dateutil.relativedelta import relativedelta
 import os
+import plotly.graph_objects as go
+
 
 PLOTS_DIR = 'dataviz'
 
@@ -99,6 +101,20 @@ def plot_days(production, entries_per_day=24, filename='day_plot'):
     plt.title(filename)
     fig.show()
     fig.savefig(PLOTS_DIR + "/" + filename + ".png", dpi=1000)
+
+
+#  len(production) % entries_per_day == 0 TODO: legend
+def plot_days_inter(production, entries_per_day=24, filename='day_plot'):
+    x = np.linspace(0, 24, entries_per_day, endpoint=False)
+    data = []
+    for i in range(len(production) // entries_per_day):
+        data.append(go.Scatter(x=x, y=production[entries_per_day * i: entries_per_day * (i + 1)], name=production.index[entries_per_day * i], line=dict(width=1,
+                color=get_color(entries_per_day * i, len(production)))))
+
+    fig = go.Figure(data=data)
+    fig.show()
+    if filename:
+        fig.write_html(PLOTS_DIR + '/' + filename + ".html")
 
 
 # 'start' and 'end' - datetime or timestamp
